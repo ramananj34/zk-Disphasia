@@ -39,14 +39,7 @@ pub struct IoTDevice {
     pub blinding_factor: Scalar, //For Petersen commitment, random secret
 }
 
-//Bulletproof Aggregator. This is just for testing, the class has everything else I need
-pub struct BulletproofsAggregator {
-    pub bulletproof_gens: BulletproofGens, //Precomputed Bulletproof generators (for batches aggregation)
-    pub pedersen_gens: PedersenGens, //Precomputed Pedersen Generator Commitments (for batches verification)
-    pub devices: HashMap<u32, DeviceProof>, //Stores devices and proofs
-    pub threshold_percentage: f64, //What percent does the aggregation have to meet?
-}
-
+//Aggregation Stats
 #[derive(Debug)]
 pub struct AggregationStats {
     pub total_devices: usize, //Total devices
@@ -54,6 +47,8 @@ pub struct AggregationStats {
     pub threshold_met: bool, //Whether or not the condition is met
     pub threshold_percentage: f64, //Percentage necessary
 }
+
+
 
 fn main() {
     println!("Hello, World");
@@ -134,4 +129,124 @@ impl BulletproofsAggregator {
         //Return if the proof is valid or not
         Ok(verification_result.is_ok())
     }
+
+    //Add or update a device proof in the aggregator
+    pub fn add_device_proof(&mut self, device_proof: DeviceProof) -> Result<(), Box<dyn std::error::Error>> {
+        //Takes in the proof, and returns if it was sucsesfully added or not
+
+        //Verify the proof before adding
+        if !self.verify_device_proof(&device_proof)? {
+            return Err("Invalid device proof".into());
+        }
+
+        //Add the proof
+        self.devices.insert(device_proof.device_id, device_proof);
+
+        //Returns if it worked or not
+        Ok(())
+    }
+
+    //Remove a device from the aggregation
+    pub fn remove_device(&mut self, device_id: u32) {
+        //Takes in the device ID and removes the proof
+
+        //Very straight forward
+        self.devices.remove(&device_id);
+    }
+
+    //Check if the threshold is met using homomorphic properties. This creates an aggregated proof without revealing individual values
+    pub fn check_threshold_with_proof(&self) -> Result<bool, Box<dyn std::error::Error>> {
+
+        //Gets total devices and the number of devices we need
+        let total_devices = self.devices.len();
+        let required_active = ((total_devices as f64) * (self.threshold_percentage / 100.0)).ceil() as usize;
+
+        //If we have no devices, then we just return
+        if total_devices == 0 {
+            return Ok(false);
+        }
+
+        //Verify all the proofs
+        for device_proof in self.devices.values() {
+            if !self.verify_device_proof(device_proof)? {
+                return Err("Invalid device proof".into());
+            }
+        }
+
+        //Homomorphic aggregation
+        let mut sum_commitment = self.pedersen_gens.commit(Scalar::zero(), Scalar::zero()); //Pedersen commitment
+        for device_proof in self.devices.values() { //For each device
+            let commitment = device_proof.commitment.decompress() //Get the commitment
+                .ok_or("Failed to decompress commitment")?;
+            sum_commitment = sum_commitment + commitment; //Add the commitment
+        }
+
+        //Extract total count using discrete log (not ideal, but there is no other way without breaking secrecy)
+        let active_count = self.discrete_log_extract(sum_commitment, total_devices)?;
+        
+        //Return threshold result
+        Ok(active_count >= required_active)
+    }
+
+    //Extract discrete log using baby-step giant-step algorithm
+    fn discrete_log_extract(&self, point: curve25519_dalek_ng::ristretto::RistrettoPoint, max_devices: usize) -> Result<usize, Box<dyn std::error::Error>> {
+        let generator = self.pedersen_gens.B; //Pedersen generator for values
+        
+        //Baby-step giant-step for efficiency with larger device counts
+        let sqrt_max = ((max_devices as f64).sqrt() as usize) + 1;
+        let mut baby_steps = std::collections::HashMap::new();
+        
+        //Baby steps:
+        let mut current = curve25519_dalek_ng::ristretto::RistrettoPoint::default();
+        for i in 0..sqrt_max { //Precompute points
+            baby_steps.insert(current.compress(), i);
+            if i < sqrt_max - 1 { current = current + generator; }
+        }
+        
+        //Giant steps:
+        let giant_step = generator * Scalar::from(sqrt_max as u64);
+        let mut gamma = point;
+        
+        for j in 0..sqrt_max {
+            if let Some(&i) = baby_steps.get(&gamma.compress()) {
+                let result = j * sqrt_max + i;
+                if result <= max_devices {
+                    return Ok(result);
+                }
+            }
+            gamma = gamma - giant_step;
+        }
+        
+        Err("Discrete log not found - sum may be outside expected range".into())
+    }
+
+
+    //Get aggregation statistics
+    pub fn get_stats(&self) -> AggregationStats {
+        let total_devices = self.devices.len();
+        let threshold_count = ((total_devices as f64) * (self.threshold_percentage / 100.0)).ceil() as usize;
+        let threshold_met = self.check_threshold_with_proof().unwrap_or(false);
+
+        AggregationStats {
+            total_devices,
+            threshold_count,
+            threshold_met,
+            threshold_percentage: self.threshold_percentage, //Use the stored percentage
+        }
+    }
+
+}
+
+
+
+
+
+
+//Testing 
+//Bulletproof Aggregator. This is just for testing, the class has everything else I need
+pub struct BulletproofsAggregator {
+    pub bulletproof_gens: BulletproofGens, //Precomputed Bulletproof generators (for batches aggregation)
+    pub pedersen_gens: PedersenGens, //Precomputed Pedersen Generator Commitments (for batches verification)
+    pub devices: HashMap<u32, DeviceProof>, //Stores devices and proofs
+    pub threshold_percentage: f64, //What percent does the aggregation have to meet?
 }
