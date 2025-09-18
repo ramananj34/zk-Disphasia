@@ -27,7 +27,7 @@ use std::collections::HashMap;
 pub struct DeviceProof {
     pub device_id: u32, //Corresponds to the device which generated the proof
     pub commitment: CompressedRistretto, //Secretly store the state
-    pub proof: Vec<u8>, // Serialized RangeProof, the evidence that the comitment satisfies the conditions
+    pub proof: Vec<u8>, //Serialized RangeProof, the evidence that the comitment satisfies the conditions
     pub timestamp: u64, //Stores when the proof was created
 }
 
@@ -35,11 +35,11 @@ pub struct DeviceProof {
 #[derive(Debug, Clone)]
 pub struct IoTDevice {
     pub id: u32, //Unique ID
-    pub state: u8, // 0 or 1
+    pub state: u8, //0 or 1
     pub blinding_factor: Scalar, //For Petersen commitment, random secret
 }
 
-//Bulletproof Aggregator
+//Bulletproof Aggregator. This is just for testing, the class has everything else I need
 pub struct BulletproofsAggregator {
     pub bulletproof_gens: BulletproofGens, //Precomputed Bulletproof generators (for batches aggregation)
     pub pedersen_gens: PedersenGens, //Precomputed Pedersen Generator Commitments (for batches verification)
@@ -57,4 +57,60 @@ pub struct AggregationStats {
 
 fn main() {
     println!("Hello, World");
+}
+
+//-------------------------------------------------
+
+//The fun part
+
+impl BulletproofsAggregator {
+    //Constructor
+    pub fn new(max_devices: usize, threshold_percentage: f64) -> Self {
+        //Takes in the max number of devices and threshold percentage defined earlier
+
+        //Generate bulletproof and pedersen generators for the maximum number of devices. These will be used for aggregation
+        //Each proof will be 64-bit range (0 or 1, but we use 64-bit for compatibility)
+        let bulletproof_gens = BulletproofGens::new(64, max_devices);
+        let pedersen_gens = PedersenGens::default();
+        
+        //Defines what we need. The generators we just made, the devices/commitments, and the threshold percentage. 
+        Self {
+            bulletproof_gens,
+            pedersen_gens,
+            devices: HashMap::new(),
+            threshold_percentage,
+        }
+    }
+
+    //Generate a zero-knowledge proof for a device's state (0 or 1)
+    pub fn generate_device_proof(&self, device: &IoTDevice) -> Result<DeviceProof, Box<dyn std::error::Error>> {
+        //Takes in the IoT device, and creates a proof or an error if something goes wrong
+
+        //In practice we need a transcript, which is a register of the inputs to ensure that they are tamper proof. This includes replay attacks and proof collisions if the states are the same
+        let mut transcript = Transcript::new(b"IoT Device State Proof");
+        transcript.append_message(b"device_id", &device.id.to_le_bytes());
+        
+        //Create commitment to the device state. It is a pederson commitment that takes the state and binding factor (the aformentioned secret)
+        let commitment = self.pedersen_gens.commit(
+            Scalar::from(device.state as u64),
+            device.blinding_factor,
+        );
+
+        //Generate range proof that the committed value is either 0 or 1, using bulletproofs on top of the Pedersen Commitment
+        //The transcript is passed to prove_single and used internally by Bulletproofs
+        //Also takes the generators, device state, binding factor, and 1 (one bit because it is 0 or 1)
+        let (proof, _) = RangeProof::prove_single(&self.bulletproof_gens, &self.pedersen_gens, &mut transcript, device.state as u64, &device.blinding_factor, 1)?;
+
+        //Serialize the proof for transmission
+        let proof_bytes = bincode::serialize(&proof)?;
+
+        //Now we create and return the proof. It contains the device id, commitment, proof, and timestamp
+        Ok(DeviceProof {
+            device_id: device.id,
+            commitment: commitment.compress(),
+            proof: proof_bytes,
+            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+        })
+    }
+
 }
