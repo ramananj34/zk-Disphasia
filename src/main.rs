@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 //Imports operations for curve25519, maintained by Dalek. CompressedRistretto is a point on a Risetto Prime Order Subgroup, Scalar is just a scalar for ECC operations
-use curve25519_dalek_ng::{ristretto::CompressedRistretto, scalar::Scalar};
+use curve25519_dalek_ng::{ristretto::CompressedRistretto, scalar::Scalar, traits::Identity};
 
 //Bulletproofs library, mainatined by Dalek:
 //BulletproofGens are precomputed ECC points for proofs
@@ -57,6 +57,13 @@ fn main() {
 //-------------------------------------------------
 
 //The fun part
+
+pub struct BulletproofsAggregator {
+    pub bulletproof_gens: BulletproofGens, //Precomputed Bulletproof generators (for batches aggregation)
+    pub pedersen_gens: PedersenGens, //Precomputed Pedersen Generator Commitments (for batches verification)
+    pub devices: HashMap<u32, DeviceProof>, //Stores devices and proofs
+    pub threshold_percentage: f64, //What percent does the aggregation have to meet?
+}
 
 impl BulletproofsAggregator {
     //Constructor
@@ -197,7 +204,7 @@ impl BulletproofsAggregator {
         let mut baby_steps = std::collections::HashMap::new();
         
         //Baby steps:
-        let mut current = curve25519_dalek_ng::ristretto::RistrettoPoint::default();
+        let mut current = curve25519_dalek_ng::ristretto::RistrettoPoint::identity();
         for i in 0..sqrt_max { //Precompute points
             baby_steps.insert(current.compress(), i);
             if i < sqrt_max - 1 { current = current + generator; }
@@ -235,18 +242,4 @@ impl BulletproofsAggregator {
         }
     }
 
-}
-
-
-
-
-
-
-//Testing 
-//Bulletproof Aggregator. This is just for testing, the class has everything else I need
-pub struct BulletproofsAggregator {
-    pub bulletproof_gens: BulletproofGens, //Precomputed Bulletproof generators (for batches aggregation)
-    pub pedersen_gens: PedersenGens, //Precomputed Pedersen Generator Commitments (for batches verification)
-    pub devices: HashMap<u32, DeviceProof>, //Stores devices and proofs
-    pub threshold_percentage: f64, //What percent does the aggregation have to meet?
 }
