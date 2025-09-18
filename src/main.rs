@@ -113,4 +113,25 @@ impl BulletproofsAggregator {
         })
     }
 
+
+    //Verify the proof
+    pub fn verify_device_proof(&self, device_proof: &DeviceProof) -> Result<bool, Box<dyn std::error::Error>> {
+        //Takes in the proof, and returns whether it is valid or invalid
+
+        //As mentioned before, we need a transcript to ensure that there was no tampering. We use the ID again
+        let mut transcript = Transcript::new(b"IoT Device State Proof");
+        transcript.append_message(b"device_id", &device_proof.device_id.to_le_bytes());
+        
+        //Deserialize the proof
+        let proof: RangeProof = bincode::deserialize(&device_proof.proof)?;
+        
+        //Decompress the commitment
+        let commitment = device_proof.commitment.decompress().ok_or("Failed to decompress commitment")?;
+
+        //Verify the range proof
+        let verification_result = proof.verify_single(&self.bulletproof_gens,&self.pedersen_gens,&mut transcript, &commitment.compress(),1);
+
+        //Return if the proof is valid or not
+        Ok(verification_result.is_ok())
+    }
 }
