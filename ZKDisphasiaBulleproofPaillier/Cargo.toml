@@ -1,7 +1,0 @@
-[package]
-name = "ZK-DISPHASIA_Paillier_Bulletproof"
-version = "0.1.0"
-authors = ["Jude Ramanan"]
-edition = "2024"
-description = "Zero Knowledge Distributed IoT Secure Protocol for Homomorphic Aggregation Schemes, Infrastructure, and Algorithms (Version using Bulletproof and Paillier)"
-repository = "https://github.com/ramananj34/ZK-Disphasia"
