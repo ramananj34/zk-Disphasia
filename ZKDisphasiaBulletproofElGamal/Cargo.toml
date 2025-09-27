@@ -1,0 +1,20 @@
+[package]
+name = "ZK-DISPHASIA_ElGamal_Bulletproof"
+version = "0.1.0"
+authors = ["Jude Ramanan"]
+edition = "2021"
+description = "Zero Knowledge Distributed IoT Secure Protocol for Homomorphic Aggregation Schemes, Infrastructure, and Algorithms (Version using Bulletproof and ElGamal)"
+repository = "https://github.com/ramananj34/ZK-Disphasia"
+
+[dependencies]
+curve25519-dalek-ng = { version = "4.1", features = ["u64_backend", "serde"], default-features = false } #My curve
+ed25519-dalek = { version = "2.0", features = ["rand_core"] } #Digital signatures
+bulletproofs = "4.0" #Bulletproofs
+merlin = "3.0" #Transcripts
+frost-ristretto255 = "1.0" #FROST
+rand = "0.8" #Random support
+rand_core = "0.6" #Random support
+subtle = "2.4" #Constant time operations
+zeroize = "1.5" #Data deletion
+serde = { version = "1.0", features = ["derive"] } #Serialization/deserialization
+serde_with = "3.14" #Serialization/deserialization
