@@ -2,7 +2,7 @@
 name = "ZK-DISPHASIA_ElGamal_Bulletproof"
 version = "0.1.0"
 authors = ["Jude Ramanan"]
-edition = "2021"
+edition = "2024"
 description = "Zero Knowledge Distributed IoT Secure Protocol for Homomorphic Aggregation Schemes, Infrastructure, and Algorithms (Version using Bulletproof and ElGamal)"
 repository = "https://github.com/ramananj34/ZK-Disphasia"
 
