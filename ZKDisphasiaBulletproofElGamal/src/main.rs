@@ -4,29 +4,21 @@
 //Serialization/deserialization
 use serde::{Deserialize, Serialize, Deserializer, Serializer};
 use serde_with::{serde_as, Bytes};
-
 //The curve
 use curve25519_dalek_ng::{ristretto::{CompressedRistretto, RistrettoPoint}, scalar::Scalar, traits::Identity, constants::RISTRETTO_BASEPOINT_POINT};
-
 //Bulletproofs (Dalek)
 use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
-
 //Transcript
 use merlin::Transcript;
-
 //Frost
 use frost_ristretto255 as frost;
-
 //ECDSA
 use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
-
 //Side Channel Protection
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
-
 //Random
 use rand::rngs::OsRng;
-
 //Standard Data Structures
 use std::collections::{HashMap, BTreeMap};
 use std::error::Error;
@@ -68,7 +60,7 @@ impl std::fmt::Display for AggError { //Now we make the errors more verbose for 
 }
 impl Error for AggError {} //Make it behave like a error
 
-//This is custom serialization/desesrialization logic for cryptography
+//This is custom serialization/deserialization logic for cryptography
 macro_rules! impl_serde_wrapper {
     ($name:ident, $inner:ty, $size:expr, $from:expr) => {
         //Name is the new wrapper struct, inner is the type it wraps, size:expr is the expected size, and from:expr is a function to rebuild
@@ -142,26 +134,26 @@ impl SchnorrProof {
     //First we generate the proof
     fn prove_dlog_equality(secret: &Scalar, sum_c1: &RistrettoPoint, partial: &RistrettoPoint, ts: u64, id: u32) -> Self {
         let r = Scalar::random(&mut OsRng); //Create a random nonce
-        let commitment = sum_c1 * r; //Comitment = r*sum_c1
-        let challenge = Self::challenge(&sum_c1, &partial, &commitment, ts, id); //Helper function Fiat-Shamir challange
+        let commitment = sum_c1 * r; //commitment = r*sum_c1
+        let challenge = Self::challenge(&sum_c1, &partial, &commitment, ts, id); //Helper function Fiat-Shamir challenge
         let response = r + challenge * secret; //Response is r+cx
         Self { commitment: commitment.compress().into(), response: response.into() }
     }
     //Now we can verify the proof
     fn verify_dlog_equality(&self, sum_c1: &RistrettoPoint, partial: &RistrettoPoint, ts: u64, id: u32) -> bool {
         let commitment = match self.commitment.0.decompress() { Some(c) => c, None => return false }; //Get the commitment point
-        let challenge = Self::challenge(&sum_c1, &partial, &commitment, ts, id); //Recompute the challange
-        sum_c1 * self.response.0 == commitment + partial * challenge //Verify the challange and validity of the proof
+        let challenge = Self::challenge(&sum_c1, &partial, &commitment, ts, id); //Recompute the challenge
+        sum_c1 * self.response.0 == commitment + partial * challenge //Verify the challenge and validity of the proof
     }
-    //Helper function for the challange (Fiat-Shamir Transform)
+    //Helper function for the challenge (Fiat-Shamir Transform)
     fn challenge(sum_c1: &RistrettoPoint, partial: &RistrettoPoint, commitment: &RistrettoPoint, ts: u64, id: u32) -> Scalar {
-        let mut t = Transcript::new(b"schnorr-dlog-equality"); //New Merlin Transcript. Label gives domain-seperation
+        let mut t = Transcript::new(b"schnorr-dlog-equality"); //New Merlin Transcript. Label gives domain-separation
         t.append_u64(b"timestamp", ts); //Binding data (replay attack protection)
         t.append_u64(b"device", id as u64); //Binding data (replay attack protection)
         t.append_message(b"sum_c1", sum_c1.compress().as_bytes()); //State data
         t.append_message(b"partial", partial.compress().as_bytes()); //State data
         t.append_message(b"commitment", commitment.compress().as_bytes()); //State data
-        //Now we use the Merlin transcript to derive a strong scalar challange (Hashes internlly). It is deterministic on the state
+        //Now we use the Merlin transcript to derive a strong scalar challenge (Hashes internally). It is deterministic on the state
         let mut bytes = [0u8; 64];
         t.challenge_bytes(b"challenge", &mut bytes);
         Scalar::from_bytes_mod_order_wide(&bytes)
@@ -175,8 +167,8 @@ pub struct IoTDevice {
     pub group_public: frost::keys::PublicKeyPackage, //Public key for FROST
     pub signing_key: SigningKey, //ECDSA signing key
     pub peer_keys: HashMap<u32, VerifyingKey>, //Peer public signing keys
-    pub received_proofs: HashMap<u32, DeviceProof>, //Proofs recieved
-    pub received_partials: HashMap<u32, PartialDecryption>, //Partials recieved
+    pub received_proofs: HashMap<u32, DeviceProof>, //Proofs received
+    pub received_partials: HashMap<u32, PartialDecryption>, //Partials received
     pub current_aggregate_c1: Option<RistrettoPoint>, //Running sum of encrypted states/Risteretto Points
     pub current_aggregate_c2: Option<RistrettoPoint>, //Running sum of encrypted states/Risteretto Points
     bulletproof_gens: BulletproofGens, //Bulletproof Generators
@@ -212,7 +204,7 @@ impl IoTDevice {
         let (c1, c2) = (g * r, g * Scalar::from(state as u64) + h * r);
         //Pederson Commitment (hide and bind)
         let commitment = self.pedersen_gens.commit(Scalar::from(state as u64), r);
-        //Use a Merlin Transcript to generate a challange
+        //Use a Merlin Transcript to generate a challenge
         let mut transcript = Transcript::new(b"iot-range-proof");
         //Generate the Bulletproof
         let (proof, _) = RangeProof::prove_single(&self.bulletproof_gens, &self.pedersen_gens, &mut transcript, state as u64, &r, 8).map_err(|e| { r.zeroize(); AggError::CryptoError(format!("Bulletproof failed: {:?}", e)) })?;
@@ -248,7 +240,7 @@ impl IoTDevice {
     }
     //Recompute the aggregate
     fn recompute_aggregate(&mut self) {
-        if self.received_proofs.is_empty() { //If we have no proofs, the aggreagete is zero
+        if self.received_proofs.is_empty() { //If we have no proofs, the aggregate is zero
             self.current_aggregate_c1 = None;
             self.current_aggregate_c2 = None;
         } else { //If we have proofs
@@ -270,7 +262,7 @@ impl IoTDevice {
         let now = current_timestamp();
         //Get the P2P neighbor from the hashmap or make a new entry
         let entry = self.peer_rates.entry(id).or_insert((now, 0));
-        //If window is expiried, make a new window
+        //If window is expired, make a new window
         if now >= entry.0 + RATE_WINDOW_SECS { *entry = (now, 0); }
         //If device has too many entries, Rate Limit Error it
         if entry.1 >= MAX_MESSAGES_PER_WINDOW { return Err(AggError::RateLimited); }
@@ -278,7 +270,7 @@ impl IoTDevice {
         entry.1 += 1;
         Ok(())
     }
-    //Handel the recieving of a proof
+    //Handel the receiving of a proof
     pub fn receive_proof(&mut self, proof: DeviceProof) -> Result<(), AggError> {
         //First we check the rate limiting
         self.check_rate(proof.device_id)?;
@@ -291,7 +283,7 @@ impl IoTDevice {
         }
         //Now we make sure the proof is not too large
         if proof.bulletproof.len() > MAX_BULLETPROOF_BYTES { return Err(AggError::InvalidProof("Bulletproof too large".into())); }
-        //Now we verfiy the signature
+        //Now we verify the signature
         let pubkey = self.peer_keys.get(&proof.device_id).ok_or(AggError::InvalidProof("Unknown device".into()))?;
         self.verify_sig(pubkey, &[&proof.timestamp.to_le_bytes(), &proof.device_id.to_le_bytes(), 
             proof.elgamal_c1.0.as_bytes(), proof.elgamal_c2.0.as_bytes()], &proof.signature)?;
@@ -318,15 +310,15 @@ impl IoTDevice {
         let partial = sum_c1 * secret;
         //Construct the Schnorr proof for the partial
         let proof = SchnorrProof::prove_dlog_equality(&secret, &sum_c1, &partial, ts, self.id);
-        //Safley delet the secret
+        //Safely delete the secret
         secret.zeroize();
-        //Construct the PartialDecryption object w ith everything we did
+        //Construct the PartialDecryption object with everything we did
         Ok(PartialDecryption {
             device_id: self.id, timestamp: ts, partial: partial.compress().into(), proof,
             signature: self.sign_data(&[&ts.to_le_bytes(), &self.id.to_le_bytes(), partial.compress().as_bytes()]),
         })
     }
-    //Logic to recieve the partial decryptions
+    //Logic to receive the partial decryptions
     pub fn receive_partial(&mut self, partial: PartialDecryption) -> Result<(), AggError> {
         //Rate check the device for DoS protection
         self.check_rate(partial.device_id)?;
@@ -344,7 +336,7 @@ impl IoTDevice {
     pub fn compute_aggregate(&mut self) -> Result<(usize, usize), AggError> {
         //Make sure the aggregate is up to date
         self.recompute_aggregate();
-        //Now we get the valid proofs and valid partial decrtptions
+        //Now we get the valid proofs and valid partial decryptions
         let thresh = current_timestamp().saturating_sub(PROOF_EXPIRATION_SECS);
         let valid_proofs: Vec<_> = self.received_proofs.values().filter(|p| p.timestamp > thresh).collect();
         if valid_proofs.is_empty() { return Ok((0, 0)); }
@@ -378,7 +370,7 @@ impl IoTDevice {
             }
             combined += verified[i].1 * lambda;
         }
-        //Finally, we use the Babby Step Giant Step Algorithm to extract the final aggregate
+        //Finally, we use the Baby Step Giant Step Algorithm to extract the final aggregate
         Ok((bsgs_discrete_log(sum_c2 - combined, RISTRETTO_BASEPOINT_POINT)?, valid_proofs.len()))
     }
     //This is just ECDSA
@@ -481,7 +473,7 @@ pub fn setup_dkg(num: usize, threshold: usize) -> Result<Vec<(u32, frost::keys::
         //Copy round 1 secrets and remove your own package
         let mut received_r1 = r1_packages.clone();
         received_r1.remove(&id);
-        //Final FROST call, geting the final key package for the public and private keys.
+        //Final FROST call, getting the final key package for the public and private keys.
         let (key_package, pubkey_package) = frost::keys::dkg::part3(r2_secret, &received_r1, &received_r2)
             .map_err(|e| AggError::CryptoError(e.to_string()))?;
         //Save the results
@@ -518,7 +510,7 @@ fn main() -> Result<(), AggError> {
     let (num_devices, threshold, states) = (5, 3, [1u8, 0, 1, 1, 0]);
     println!("Setting up DKG for {} devices (threshold: {})...", num_devices, threshold);
     let dkg_results = setup_dkg(num_devices, threshold)?;
-    println!("DKG Setup Succsess");
+    println!("DKG Setup Success");
 
     //Create the Devices
     println!("Creating the Devices");
