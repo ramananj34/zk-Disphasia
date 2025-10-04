@@ -423,13 +423,11 @@ pub fn load_kzg_params() -> Result<ParamsKZG<Bn256>, AggError> {
     let file = File::open(params_path).map_err(|e| AggError::CryptoError(format!("Failed to open params file: {}", e)))?;
     let mut reader = BufReader::new(file);
     let params = ParamsKZG::<Bn256>::read(&mut reader).map_err(|e| AggError::CryptoError(format!("Failed to read params: {}", e)))?;
-    println!("✓ KZG parameters loaded successfully (k={})", params.k());
     Ok(params)
 }
 
 //Setup Halo2 with KZG commitments
 pub fn setup_halo2() -> Result<Halo2Setup, AggError> {
-    println!("Setting up Halo2 with KZG commitment scheme...");
     let params = load_kzg_params()?; //Load pre-generated KZG parameters
     let empty_circuit = BinaryStateCircuit { state: Value::unknown() }; //Empty circuit for keygen
     let vk = keygen_vk(&params, &empty_circuit).map_err(|e| AggError::CryptoError(format!("VK generation failed: {:?}", e)))?; //Generate verifying key
