@@ -488,8 +488,8 @@ fn main() -> Result<(), AggError> {
     //Generating Proofs
     for (i, state) in states.iter().enumerate() {
         let proof = devices[i].generate_proof(*state)?;
-        println!("  Device {} generated proof for state {} (size: {} bytes)", 
-                 i + 1, state, proof.halo2_proof.len());
+        println!("  Device {} generated proof for state {}", 
+                 i + 1, state);
         for (j, device) in devices.iter_mut().enumerate() {
             if let Err(e) = device.receive_proof(proof.clone()) {
                 if i != j { 
