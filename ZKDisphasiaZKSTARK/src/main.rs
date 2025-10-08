@@ -72,13 +72,13 @@ impl Air for BinaryStateAir {
     type GkrVerifier = ();
 
     fn new(trace_info: TraceInfo, _pub_inputs: StarkPublicInputs, options: ProofOptions) -> Self {
-        // Back to 1 column trace
+        //Back to 1 column trace
         assert_eq!(1, trace_info.width(), "Trace must have exactly 1 column");
         
         let degrees = vec![
-            TransitionConstraintDegree::new(2), // Binary constraint
+            TransitionConstraintDegree::new(2), //Binary constraint
         ];
-        // Use 0 assertions - we'll work around it differently
+        //Use 0 assertions - we'll work around it differently
         let context = AirContext::new(trace_info, degrees, 0, options);
         Self { context }
     }
@@ -96,12 +96,12 @@ impl Air for BinaryStateAir {
         let current = frame.current()[0];
         let one = E::ONE;
         
-        // Enforce: state * (state - 1) = 0
+        //Enforce: state * (state - 1) = 0
         result[0] = current * (current - one);
     }
 
     fn get_assertions(&self) -> Vec<Assertion<BaseElement>> {
-        // Return empty - the transition constraint is sufficient
+        //Return empty - the transition constraint is sufficient
         vec![]
     }
 }
@@ -199,7 +199,7 @@ macro_rules! impl_serde_wrapper {
 impl_serde_wrapper!(SerializableCompressedRistretto, CompressedRistretto, 32, CompressedRistretto);
 impl_serde_wrapper!(SerializableScalar, Scalar, 32, Scalar::from_bytes_mod_order);
 
-// Public inputs for binding ElGamal ciphertext to STARK proof
+//Public inputs for binding ElGamal ciphertext to STARK proof
 #[derive(Clone, Copy, Debug)]
 pub struct StarkPublicInputs {
     pub c1_hash: BaseElement,
@@ -320,18 +320,18 @@ impl IoTDevice {
         let trace_length = STARK_TRACE_LENGTH;
         let state_elem = BaseElement::new(state as u128);
 
-        let mut trace = TraceTable::new(1, trace_length);  // Back to 1 column
+        let mut trace = TraceTable::new(1, trace_length);  //Back to 1 column
 
         trace.fill(
             |trace_state| {
-                trace_state[0] = state_elem;  // Only state column
+                trace_state[0] = state_elem;  //Only state column
             },
             |_, trace_state| {
                 trace_state[0] = state_elem;
             },
         );
 
-        // Hash c1 and c2 to field elements for public inputs
+        //Hash c1 and c2 to field elements for public inputs
         let c1_hash = hash_to_base_element(b"c1", c1.compress().as_bytes());
         let c2_hash = hash_to_base_element(b"c2", c2.compress().as_bytes());
         let pub_inputs = StarkPublicInputs {
@@ -339,7 +339,7 @@ impl IoTDevice {
             c2_hash,
         };
 
-        // Create prover with public inputs bound to ciphertext
+        //Create prover with public inputs bound to ciphertext
         let prover = BinaryStateProver::new().with_pub_inputs(pub_inputs);
 
         //Generate ZK-STARK proof
@@ -406,7 +406,7 @@ impl IoTDevice {
         let stark_proof = Proof::from_bytes(&proof.stark_proof)
             .map_err(|_| AggError::InvalidProof("Invalid STARK proof format".into()))?;
 
-        // Reconstruct public inputs from ElGamal ciphertext
+        //Reconstruct public inputs from ElGamal ciphertext
         let c1_hash = hash_to_base_element(b"c1", proof.elgamal_c1.0.as_bytes());
         let c2_hash = hash_to_base_element(b"c2", proof.elgamal_c2.0.as_bytes());
         let pub_inputs = StarkPublicInputs {
@@ -579,14 +579,14 @@ fn scalar_from_frost_signing(share: &frost::keys::SigningShare) -> Result<Scalar
         .map_err(|_| AggError::CryptoError("Invalid share length".into()))?))
 }
 
-// Helper to hash bytes to STARK field element
+//Helper to hash bytes to STARK field element
 fn hash_to_base_element(prefix: &[u8], data: &[u8]) -> BaseElement {
     use blake3::Hasher;
     let mut hasher = Hasher::new();
     hasher.update(prefix);
     hasher.update(data);
     let hash = hasher.finalize();
-    // Take first 16 bytes and convert to u128
+    //Take first 16 bytes and convert to u128
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&hash.as_bytes()[0..16]);
     BaseElement::new(u128::from_le_bytes(bytes))
