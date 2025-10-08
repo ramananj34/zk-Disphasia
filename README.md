@@ -1,1 +1,1 @@
-ZK-Disphasia: Zero Knowledge Distributed IoT Secure Protocol for Homomorphic Aggregation Schemes, Infrastructure, and Algorithms
+ZK-Disphasia: Zero Knowledge Decentralized IoT Secure Protocol for Homomorphic Aggregation Schemes, Infrastructure, and Algorithms
