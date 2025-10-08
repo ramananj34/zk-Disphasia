@@ -6,7 +6,6 @@ use serde_with::{serde_as, Bytes};
 use curve25519_dalek_ng::{ristretto::{CompressedRistretto, RistrettoPoint}, scalar::Scalar, traits::Identity, constants::RISTRETTO_BASEPOINT_POINT};
 use halo2_proofs::{arithmetic::Field, circuit::{Layouter, SimpleFloorPlanner, Value}, plonk::{Advice, Circuit, Column, ConstraintSystem, Error as Halo2Error, Selector, create_proof, keygen_pk, keygen_vk, verify_proof, ProvingKey, VerifyingKey, Instance}, poly::{Rotation, commitment::Params, kzg::{commitment::{KZGCommitmentScheme, ParamsKZG}, multiopen::{ProverSHPLONK, VerifierSHPLONK}, strategy::SingleStrategy}}, transcript::{Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer}};
 use halo2_proofs::halo2curves::bn256::{Bn256, Fr as Halo2Fr, G1Affine};
-use halo2_proofs::halo2curves::group::UncompressedEncoding;
 use merlin::Transcript;
 use frost_ristretto255 as frost;
 use ed25519_dalek::{SigningKey, VerifyingKey as SigSignKey, Signature, Signer, Verifier};
@@ -62,74 +61,60 @@ impl Error for AggError {}
 
 //Circuit configuration for binary state constraint
 #[derive(Clone, Debug)]
-struct BinaryStateConfig {
-    advice: Column<Advice>,
-    selector: Selector,
-    instance: Column<Instance>, // for public inputs
-}
+struct BinaryStateConfig { advice: Column<Advice>, selector: Selector, instance: Column<Instance>}
 
-// Circuit proving state is 0 or 1
+//Circuit proving state is 0 or 1
 #[derive(Clone, Debug)]
-struct BinaryStateCircuit {
-    state: Value<Halo2Fr>,
-    pub c1: G1Affine,
-    pub c2: G1Affine,
-}
-
+struct BinaryStateCircuit { state: Value<Halo2Fr>, c1_bytes: Value<[u8; 32]>, c2_bytes: Value<[u8; 32]>}
 impl Circuit<Halo2Fr> for BinaryStateCircuit {
     type Config = BinaryStateConfig;
     type FloorPlanner = SimpleFloorPlanner;
-
-    fn without_witnesses(&self) -> Self {
-        Self { 
-            state: Value::unknown(),
-            c1: self.c1,
-            c2: self.c2,
-        }
-    }
-
+    fn without_witnesses(&self) -> Self { Self { state: Value::unknown(), c1_bytes: Value::unknown(), c2_bytes: Value::unknown()} }
     fn configure(meta: &mut ConstraintSystem<Halo2Fr>) -> Self::Config {
         let advice = meta.advice_column();
         let selector = meta.selector();
-        let instance = meta.instance_column();
         meta.enable_equality(advice);
-        meta.enable_equality(instance); // so public inputs can be used
-
-        // Gate enforces: state * (state - 1) = 0
+        //Gate enforces: state * (state - 1) = 0, so state ∈ {0,1}
+        let instance = meta.instance_column();
+        meta.enable_equality(instance);
         meta.create_gate("binary constraint", |meta| {
             let s = meta.query_selector(selector);
             let state = meta.query_advice(advice, Rotation::cur());
             let one = halo2_proofs::plonk::Expression::Constant(Halo2Fr::ONE);
             vec![s * state.clone() * (state - one)]
         });
-
         BinaryStateConfig { advice, selector, instance }
     }
-
-    fn synthesize(
-        &self,
-        config: Self::Config,
-        mut layouter: impl Layouter<Halo2Fr>,
-    ) -> Result<(), Halo2Error> {
-        // Assign private state
-        layouter.assign_region(|| "binary state", |mut region| {
+    fn synthesize(&self, config: Self::Config, mut layouter: impl Layouter<Halo2Fr>) -> Result<(), Halo2Error> {
+        let (c1_cell, c2_cell) = layouter.assign_region(|| "binary state proof", |mut region| {
             config.selector.enable(&mut region, 0)?;
             region.assign_advice(|| "state", config.advice, 0, || self.state)?;
-            Ok(())
+            
+            // Hash c1/c2 to field elements
+            let c1_scalar = self.c1_bytes.map(|bytes| {
+                let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
+                hasher.update(b"c1");
+                hasher.update(&bytes);
+                hash_to_fr(hasher.finalize().as_array())
+            });
+
+            let c2_scalar = self.c2_bytes.map(|bytes| {
+                let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
+                hasher.update(b"c2");
+                hasher.update(&bytes);
+                hash_to_fr(hasher.finalize().as_array())
+            });
+
+            let c1_cell = region.assign_advice(|| "c1", config.advice, 1, || c1_scalar)?;
+            let c2_cell = region.assign_advice(|| "c2", config.advice, 2, || c2_scalar)?;
+            
+            Ok((c1_cell, c2_cell))
         })?;
-
-        // Assign c1 and c2 as public inputs
-        layouter.constrain_instance(
-            config.instance,
-            0, // row 0 for c1
-            || Value::known(Halo2Fr::from_bytes(&self.c1.to_uncompressed().to_bytes()).unwrap()),
-        )?;
-        layouter.constrain_instance(
-            config.instance,
-            1, // row 1 for c2
-            || Value::known(Halo2Fr::from_bytes(&self.c2.to_uncompressed().to_bytes()).unwrap()),
-        )?;
-
+        
+        // Constrain to instance column
+        layouter.constrain_instance(c1_cell.cell(), config.instance, 0)?;
+        layouter.constrain_instance(c2_cell.cell(), config.instance, 1)?;
+        
         Ok(())
     }
 }
@@ -258,11 +243,31 @@ impl IoTDevice {
         let h = frost_pubkey_to_point(&self.group_public.verifying_key())?; //Get public key
         let (c1, c2) = (g * r, g * Scalar::from(state as u64) + h * r); //ElGamal encryption
         //Build Halo2 circuit with state
-        let circuit = BinaryStateCircuit { state: Value::known(Halo2Fr::from(state as u64)) };
-        let instances = vec![]; //No public inputs
+        let circuit = BinaryStateCircuit { state: Value::known(Halo2Fr::from(state as u64)), c1_bytes: Value::known(*c1.compress().as_bytes()), c2_bytes: Value::known(*c2.compress().as_bytes())};
         //Generate Halo2 proof
         let mut transcript = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
-        create_proof::<KZGCommitmentScheme<Bn256>, ProverSHPLONK<'_, Bn256>, _, _, _, _>(&self.halo2_setup.params, &self.halo2_setup.pk, &[circuit], &[&instances[..]], OsRng, &mut transcript).map_err(|e| { r.zeroize(); AggError::CryptoError(format!("Halo2 prove failed: {:?}", e)) })?;
+        let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
+        hasher.update(b"c1");
+        hasher.update(c1.compress().as_bytes());
+        let c1_instance = hash_to_fr(hasher.finalize().as_array());
+
+        hasher = blake2b_simd::Params::new().hash_length(64).to_state();
+        hasher.update(b"c2");
+        hasher.update(c2.compress().as_bytes());
+        let c2_instance = hash_to_fr(hasher.finalize().as_array());
+
+        let instances = vec![c1_instance, c2_instance];
+        create_proof::<KZGCommitmentScheme<Bn256>, ProverSHPLONK<'_, Bn256>, _, _, _, _>(
+            &self.halo2_setup.params, 
+            &self.halo2_setup.pk, 
+            &[circuit], 
+            &[&[&instances[..]]], 
+            OsRng, 
+            &mut transcript
+            ).map_err(|e| { 
+                r.zeroize(); 
+                AggError::CryptoError(format!("Halo2 prove failed: {:?}", e)) 
+        })?;
         r.zeroize(); //Securely delete nonce
         //Construct and return proof
         Ok(DeviceProof {
@@ -306,20 +311,43 @@ impl IoTDevice {
     }
     //Receive and verify device proof
     pub fn receive_proof(&mut self, proof: DeviceProof) -> Result<(), AggError> {
-        self.check_rate(proof.device_id)?; //Rate limit check
+        self.check_rate(proof.device_id)?; // Rate limit check
         let now = current_timestamp();
-        if proof.timestamp + PROOF_EXPIRATION_SECS < now { return Err(AggError::ExpiredProof); } //Expiration check
-        if self.received_proofs.get(&proof.device_id).map_or(false, |e| e.timestamp + PROOF_EXPIRATION_SECS > now) { return Err(AggError::InvalidProof("Duplicate proof".into())); } //Duplicate check
-        if proof.halo2_proof.len() > MAX_HALO2_BYTES { return Err(AggError::InvalidProof("Halo2 proof too large".into())); } //Size check
-        //Verify signature
+        if proof.timestamp + PROOF_EXPIRATION_SECS < now { return Err(AggError::ExpiredProof); }
+        if self.received_proofs.get(&proof.device_id).map_or(false, |e| e.timestamp + PROOF_EXPIRATION_SECS > now) { 
+            return Err(AggError::InvalidProof("Duplicate proof".into())); 
+        }
+        if proof.halo2_proof.len() > MAX_HALO2_BYTES { return Err(AggError::InvalidProof("Halo2 proof too large".into())); }
+        
+        // Verify signature
         let pubkey = self.peer_keys.get(&proof.device_id).ok_or(AggError::InvalidProof("Unknown device".into()))?;
         self.verify_sig(pubkey, &[&proof.timestamp.to_le_bytes(), &proof.device_id.to_le_bytes(), proof.elgamal_c1.0.as_bytes(), proof.elgamal_c2.0.as_bytes()], &proof.signature)?;
-        //Verify Halo2 proof
-        let instances = vec![];
+        
+        // Reconstruct instance values from ElGamal ciphertext
+        let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
+        hasher.update(b"c1");
+        hasher.update(proof.elgamal_c1.0.as_bytes());
+        let c1_instance = hash_to_fr(hasher.finalize().as_array());
+        
+        let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
+        hasher.update(b"c2");
+        hasher.update(proof.elgamal_c2.0.as_bytes());
+        let c2_instance = hash_to_fr(hasher.finalize().as_array());
+        
+        let instances = vec![c1_instance, c2_instance];
+        
+        // Verify Halo2 proof
         let strategy = SingleStrategy::new(&self.halo2_setup.params);
         let mut transcript = Blake2bRead::<_, G1Affine, Challenge255<_>>::init(&proof.halo2_proof[..]);
-        verify_proof::<KZGCommitmentScheme<Bn256>, VerifierSHPLONK<'_, Bn256>, _, _, _>(&self.halo2_setup.params, &self.halo2_setup.vk, strategy, &[&instances[..]], &mut transcript).map_err(|_| AggError::InvalidProof("Halo2 verification failed".into()))?;
-        self.received_proofs.insert(proof.device_id, proof); //Store proof
+        verify_proof::<KZGCommitmentScheme<Bn256>, VerifierSHPLONK<'_, Bn256>, _, _, _>(
+            &self.halo2_setup.params, 
+            &self.halo2_setup.vk, 
+            strategy, 
+            &[&[&instances[..]]],
+            &mut transcript
+        ).map_err(|_| AggError::InvalidProof("Halo2 verification failed".into()))?;
+        
+        self.received_proofs.insert(proof.device_id, proof); // Store proof
         self.maybe_recompute();
         Ok(())
     }
@@ -470,7 +498,7 @@ pub fn load_kzg_params() -> Result<ParamsKZG<Bn256>, AggError> {
 //Setup Halo2 with KZG commitments
 pub fn setup_halo2() -> Result<Halo2Setup, AggError> {
     let params = load_kzg_params()?; //Load pre-generated KZG parameters
-    let empty_circuit = BinaryStateCircuit { state: Value::unknown() }; //Empty circuit for keygen
+    let empty_circuit = BinaryStateCircuit { state: Value::unknown(), c1_bytes: Value::unknown(), c2_bytes: Value::unknown()}; //Empty circuit for keygen
     let vk = keygen_vk(&params, &empty_circuit).map_err(|e| AggError::CryptoError(format!("VK generation failed: {:?}", e)))?; //Generate verifying key
     let pk = keygen_pk(&params, vk.clone(), &empty_circuit).map_err(|e| AggError::CryptoError(format!("PK generation failed: {:?}", e)))?; //Generate proving key
     println!("Halo2 KZG Setup Success (k={}, using trusted setup)", HALO2_K);
@@ -490,6 +518,26 @@ fn frost_pubkey_to_point(key: &frost::VerifyingKey) -> Result<RistrettoPoint, Ag
 fn scalar_from_frost_signing(share: &frost::keys::SigningShare) -> Result<Scalar, AggError> {
     Ok(Scalar::from_bytes_mod_order(share.serialize().as_slice().try_into()
         .map_err(|_| AggError::CryptoError("Invalid share length".into()))?))
+}
+
+//Hash value to a field element
+fn hash_to_fr(hash_64_bytes: &[u8; 64]) -> Halo2Fr {
+    // Take first 32 bytes and reduce modulo the field order
+    let mut bytes_32 = [0u8; 32];
+    bytes_32.copy_from_slice(&hash_64_bytes[0..32]);
+    
+    // from_bytes expects little-endian, returns None if >= modulus
+    // If None, XOR with second half and try again (simple reduction)
+    match Halo2Fr::from_bytes(&bytes_32).into() {
+        Some(fr) => fr,
+        None => {
+            // Simple reduction: XOR first 32 with last 32 bytes
+            for i in 0..32 {
+                bytes_32[i] ^= hash_64_bytes[32 + i];
+            }
+            Halo2Fr::from_bytes(&bytes_32).unwrap_or(Halo2Fr::zero())
+        }
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////
