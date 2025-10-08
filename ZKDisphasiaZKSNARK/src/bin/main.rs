@@ -4,7 +4,10 @@
 use serde::{Deserialize, Serialize, Deserializer, Serializer};
 use serde_with::{serde_as, Bytes};
 use curve25519_dalek_ng::{ristretto::{CompressedRistretto, RistrettoPoint}, scalar::Scalar, traits::Identity, constants::RISTRETTO_BASEPOINT_POINT};
-use halo2_proofs::{arithmetic::Field, circuit::{Layouter, SimpleFloorPlanner, Value}, plonk::{Advice, Circuit, Column, ConstraintSystem, Error as Halo2Error, Selector, create_proof, keygen_pk, keygen_vk, verify_proof, ProvingKey, VerifyingKey, Instance}, poly::{Rotation, commitment::Params, kzg::{commitment::{KZGCommitmentScheme, ParamsKZG}, multiopen::{ProverSHPLONK, VerifierSHPLONK}, strategy::SingleStrategy}}, transcript::{Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer}};
+use halo2_proofs::{arithmetic::Field, circuit::{Layouter, SimpleFloorPlanner, Value}, 
+    plonk::{Advice, Circuit, Column, ConstraintSystem, Error as Halo2Error, Selector, create_proof, keygen_pk, keygen_vk, verify_proof, ProvingKey, VerifyingKey, Instance}, 
+    poly::{Rotation, commitment::Params, kzg::{commitment::{KZGCommitmentScheme, ParamsKZG}, multiopen::{ProverSHPLONK, VerifierSHPLONK}, strategy::SingleStrategy}}, 
+    transcript::{Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer}};
 use halo2_proofs::halo2curves::bn256::{Bn256, Fr as Halo2Fr, G1Affine};
 use merlin::Transcript;
 use frost_ristretto255 as frost;
@@ -74,7 +77,7 @@ impl Circuit<Halo2Fr> for BinaryStateCircuit {
         let advice = meta.advice_column();
         let selector = meta.selector();
         meta.enable_equality(advice);
-        //Gate enforces: state * (state - 1) = 0, so state ∈ {0,1}
+        //Gate enforces: state * (state - 1) = 0, so state in {0,1}
         let instance = meta.instance_column();
         meta.enable_equality(instance);
         meta.create_gate("binary constraint", |meta| {
@@ -111,7 +114,7 @@ impl Circuit<Halo2Fr> for BinaryStateCircuit {
             Ok((c1_cell, c2_cell))
         })?;
         
-        // Constrain to instance column
+        //Constrain to instance column
         layouter.constrain_instance(c1_cell.cell(), config.instance, 0)?;
         layouter.constrain_instance(c2_cell.cell(), config.instance, 1)?;
         
