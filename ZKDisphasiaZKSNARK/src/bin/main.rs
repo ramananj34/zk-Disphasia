@@ -189,7 +189,7 @@ impl SchnorrProof {
         Self { commitment: commitment.compress().into(), response: response.into() }
     }
     fn verify_dlog_equality(&self, sum_c1: &RistrettoPoint, partial: &RistrettoPoint, ts: u64, id: u32) -> bool {
-        let commitment = match self.commitment.0.decompress() { Some(c) => c, None => return false };
+        let commitment = match self.commitment.0.decompress() { Some(c) => c, _none => return false };
         let challenge = Self::challenge(&sum_c1, &partial, &commitment, ts, id);
         sum_c1 * self.response.0 == commitment + partial * challenge //Verify equation
     }

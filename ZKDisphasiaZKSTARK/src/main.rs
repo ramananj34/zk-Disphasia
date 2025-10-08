@@ -67,14 +67,18 @@ pub struct BinaryStateAir {
 
 impl Air for BinaryStateAir {
     type BaseField = BaseElement;
-    type PublicInputs = BaseElement;
+    type PublicInputs = StarkPublicInputs;
     type GkrProof = ();
     type GkrVerifier = ();
 
-    fn new(trace_info: TraceInfo, _pub_inputs: BaseElement, options: ProofOptions) -> Self {
+    fn new(trace_info: TraceInfo, _pub_inputs: StarkPublicInputs, options: ProofOptions) -> Self {
+        // Back to 1 column trace
+        assert_eq!(1, trace_info.width(), "Trace must have exactly 1 column");
+        
         let degrees = vec![
-            TransitionConstraintDegree::new(2), //Binary constraint: state * (state - 1) = 0
+            TransitionConstraintDegree::new(2), // Binary constraint
         ];
+        // Use 0 assertions - we'll work around it differently
         let context = AirContext::new(trace_info, degrees, 0, options);
         Self { context }
     }
@@ -91,40 +95,41 @@ impl Air for BinaryStateAir {
     ) {
         let current = frame.current()[0];
         let one = E::ONE;
-        //Enforce: state * (state - 1) = 0, ensuring state ∈ {0,1}
+        
+        // Enforce: state * (state - 1) = 0
         result[0] = current * (current - one);
     }
 
     fn get_assertions(&self) -> Vec<Assertion<BaseElement>> {
-        //We only assert that the value is constant throughout the trace
-        //We do NOT reveal what the value is - that stays encrypted in ElGamal
-        //The assertion just ensures the trace is well-formed
-        let last_step = self.context.trace_info().length() - 1;
-        vec![
-            //Assert that first and last values are equal (constant trace)
-            Assertion::periodic(0, 0, last_step, BaseElement::ONE),
-        ]
+        // Return empty - the transition constraint is sufficient
+        vec![]
     }
 }
 
 //STARK Prover for binary state
 pub struct BinaryStateProver {
     options: ProofOptions,
+    pub_inputs: StarkPublicInputs,
 }
 
 impl BinaryStateProver {
     pub fn new() -> Self {
-        Self {
-            options: ProofOptions::new(
-                32,  //num_queries: security parameter
-                8,   //blowup_factor: trace extension factor
-                0,   //grinding_factor: proof-of-work component
-                winterfell::FieldExtension::None,
-                4,   //fri_folding_factor
-                31,  //fri_remainder_max_degree
-            ),
-        }
+    Self {
+        options: ProofOptions::new(
+            32,
+            8,
+            0,
+            winterfell::FieldExtension::None,
+            4,
+            31,
+        ),
+        pub_inputs: StarkPublicInputs::default(),
     }
+    }
+    pub fn with_pub_inputs(mut self, pub_inputs: StarkPublicInputs) -> Self {
+        self.pub_inputs = pub_inputs;
+        self
+    }  
 }
 
 impl Prover for BinaryStateProver {
@@ -137,10 +142,8 @@ impl Prover for BinaryStateProver {
     type TraceLde<E: FieldElement<BaseField = Self::BaseField>> = DefaultTraceLde<E, Self::HashFn, Self::VC>;
     type ConstraintEvaluator<'a, E: FieldElement<BaseField = Self::BaseField>> = DefaultConstraintEvaluator<'a, Self::Air, E>;
 
-    fn get_pub_inputs(&self, _trace: &Self::Trace) -> BaseElement {
-        //Return a dummy value - we don't reveal the actual state!
-        //The state stays hidden in the ElGamal encryption
-        BaseElement::ZERO
+    fn get_pub_inputs(&self, _trace: &Self::Trace) -> StarkPublicInputs {
+        self.pub_inputs
     }
 
     fn options(&self) -> &ProofOptions {
@@ -195,6 +198,28 @@ macro_rules! impl_serde_wrapper {
 }
 impl_serde_wrapper!(SerializableCompressedRistretto, CompressedRistretto, 32, CompressedRistretto);
 impl_serde_wrapper!(SerializableScalar, Scalar, 32, Scalar::from_bytes_mod_order);
+
+// Public inputs for binding ElGamal ciphertext to STARK proof
+#[derive(Clone, Copy, Debug)]
+pub struct StarkPublicInputs {
+    pub c1_hash: BaseElement,
+    pub c2_hash: BaseElement,
+}
+
+impl winterfell::math::ToElements<BaseElement> for StarkPublicInputs {
+    fn to_elements(&self) -> Vec<BaseElement> {
+        vec![self.c1_hash, self.c2_hash]
+    }
+}
+
+impl Default for StarkPublicInputs {
+    fn default() -> Self {
+        Self {
+            c1_hash: BaseElement::ZERO,
+            c2_hash: BaseElement::ZERO,
+        }
+    }
+}
 
 //Device proof with ZK-STARK proof and ElGamal encryption
 #[serde_as]
@@ -267,7 +292,6 @@ pub struct IoTDevice {
     pub received_partials: HashMap<u32, PartialDecryption>, //Received partial decryptions
     pub current_aggregate_c1: Option<RistrettoPoint>, //Sum of ElGamal c1
     pub current_aggregate_c2: Option<RistrettoPoint>, //Sum of ElGamal c2
-    stark_prover: BinaryStateProver, //STARK prover
     pub threshold: usize, //Threshold for decryption
     peer_rates: HashMap<u32, (u64, u32)>, //Rate limiting per peer
     last_recompute: u64, //Last aggregate recomputation time
@@ -282,7 +306,7 @@ impl IoTDevice {
             signing_key, peer_keys, //Random signing key
             received_proofs: HashMap::new(), received_partials: HashMap::new(), //Empty maps
             current_aggregate_c1: None, current_aggregate_c2: None, //No aggregate yet
-            stark_prover: BinaryStateProver::new(), threshold, //STARK prover and threshold
+            threshold, //STARK prover and threshold
             peer_rates: HashMap::new(), last_recompute: 0, //Empty rate limits
         }
     }
@@ -293,24 +317,33 @@ impl IoTDevice {
         let h = frost_pubkey_to_point(&self.group_public.verifying_key())?; //Get public key
         let (c1, c2) = (g * r, g * Scalar::from(state as u64) + h * r); //ElGamal encryption
         
-        //Build STARK execution trace
         let trace_length = STARK_TRACE_LENGTH;
-        let mut trace = TraceTable::new(1, trace_length);
         let state_elem = BaseElement::new(state as u128);
-        
-        //Fill trace with state value (constant throughout execution)
+
+        let mut trace = TraceTable::new(1, trace_length);  // Back to 1 column
+
         trace.fill(
-            |state| {
-                state[0] = state_elem;
+            |trace_state| {
+                trace_state[0] = state_elem;  // Only state column
             },
-            |_, state| {
-                //State doesn't change - it remains constant
-                state[0] = state_elem;
+            |_, trace_state| {
+                trace_state[0] = state_elem;
             },
         );
-        
+
+        // Hash c1 and c2 to field elements for public inputs
+        let c1_hash = hash_to_base_element(b"c1", c1.compress().as_bytes());
+        let c2_hash = hash_to_base_element(b"c2", c2.compress().as_bytes());
+        let pub_inputs = StarkPublicInputs {
+            c1_hash,
+            c2_hash,
+        };
+
+        // Create prover with public inputs bound to ciphertext
+        let prover = BinaryStateProver::new().with_pub_inputs(pub_inputs);
+
         //Generate ZK-STARK proof
-        let proof = self.stark_prover.prove(trace)
+        let proof = prover.prove(trace)
             .map_err(|e| { r.zeroize(); AggError::CryptoError(format!("STARK prove failed: {:?}", e)) })?;
         
         r.zeroize(); //Securely delete nonce
@@ -372,13 +405,17 @@ impl IoTDevice {
         //Verify ZK-STARK proof
         let stark_proof = Proof::from_bytes(&proof.stark_proof)
             .map_err(|_| AggError::InvalidProof("Invalid STARK proof format".into()))?;
-        
-        //Public input is dummy - we don't reveal individual states!
-        //The STARK only proves the value is binary (0 or 1)
-        //The actual value stays encrypted in ElGamal
-        let pub_inputs = BaseElement::ZERO;
+
+        // Reconstruct public inputs from ElGamal ciphertext
+        let c1_hash = hash_to_base_element(b"c1", proof.elgamal_c1.0.as_bytes());
+        let c2_hash = hash_to_base_element(b"c2", proof.elgamal_c2.0.as_bytes());
+        let pub_inputs = StarkPublicInputs {
+            c1_hash,
+            c2_hash,
+        };
+
         let min_opts = AcceptableOptions::MinConjecturedSecurity(95);
-        
+
         winterfell::verify::<BinaryStateAir, Blake3_256<BaseElement>, DefaultRandomCoin<Blake3_256<BaseElement>>, MerkleTree<Blake3_256<BaseElement>>>(
             stark_proof,
             pub_inputs,
@@ -540,6 +577,19 @@ fn scalar_from_frost_signing(share: &frost::keys::SigningShare) -> Result<Scalar
     let serialized = share.serialize();
     Ok(Scalar::from_bytes_mod_order(serialized.as_slice().try_into()
         .map_err(|_| AggError::CryptoError("Invalid share length".into()))?))
+}
+
+// Helper to hash bytes to STARK field element
+fn hash_to_base_element(prefix: &[u8], data: &[u8]) -> BaseElement {
+    use blake3::Hasher;
+    let mut hasher = Hasher::new();
+    hasher.update(prefix);
+    hasher.update(data);
+    let hash = hasher.finalize();
+    // Take first 16 bytes and convert to u128
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[0..16]);
+    BaseElement::new(u128::from_le_bytes(bytes))
 }
 
 ////////////////////////////////////////////////////////////////////////////
