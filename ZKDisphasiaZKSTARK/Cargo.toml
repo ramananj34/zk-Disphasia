@@ -1,0 +1,20 @@
+[package]
+name = "ZK-DISPHASIA_ZKSTARK"
+version = "0.1.0"
+authors = ["Jude Ramanan"]
+edition = "2024"
+description = "Zero Knowledge Distributed IoT Secure Protocol for Homomorphic Aggregation Schemes, Infrastructure, and Algorithms (Version using ZK-STARK)"
+repository = "https://github.com/ramananj34/ZK-Disphasia"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_with = "3.4"
+serde_json = "1.0"
+curve25519-dalek-ng = "4.1"
+winterfell = "0.10"
+frost-ristretto255 = "2.0.0"
+ed25519-dalek = { version = "2.1", features = ["serde"] }
+blake3 = "1.5"
+subtle = "2.5"
+zeroize = "1.7"
+rand = "0.8"
