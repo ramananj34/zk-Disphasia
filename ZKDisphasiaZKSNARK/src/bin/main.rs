@@ -4,8 +4,9 @@
 use serde::{Deserialize, Serialize, Deserializer, Serializer};
 use serde_with::{serde_as, Bytes};
 use curve25519_dalek_ng::{ristretto::{CompressedRistretto, RistrettoPoint}, scalar::Scalar, traits::Identity, constants::RISTRETTO_BASEPOINT_POINT};
-use halo2_proofs::{arithmetic::Field, circuit::{Layouter, SimpleFloorPlanner, Value}, plonk::{Advice, Circuit, Column, ConstraintSystem, Error as Halo2Error, Selector, create_proof, keygen_pk, keygen_vk, verify_proof, ProvingKey, VerifyingKey}, poly::{Rotation, commitment::Params, kzg::{commitment::{KZGCommitmentScheme, ParamsKZG}, multiopen::{ProverSHPLONK, VerifierSHPLONK}, strategy::SingleStrategy}}, transcript::{Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer}};
+use halo2_proofs::{arithmetic::Field, circuit::{Layouter, SimpleFloorPlanner, Value}, plonk::{Advice, Circuit, Column, ConstraintSystem, Error as Halo2Error, Selector, create_proof, keygen_pk, keygen_vk, verify_proof, ProvingKey, VerifyingKey, Instance}, poly::{Rotation, commitment::Params, kzg::{commitment::{KZGCommitmentScheme, ParamsKZG}, multiopen::{ProverSHPLONK, VerifierSHPLONK}, strategy::SingleStrategy}}, transcript::{Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer}};
 use halo2_proofs::halo2curves::bn256::{Bn256, Fr as Halo2Fr, G1Affine};
+use halo2_proofs::halo2curves::group::UncompressedEncoding;
 use merlin::Transcript;
 use frost_ristretto255 as frost;
 use ed25519_dalek::{SigningKey, VerifyingKey as SigSignKey, Signature, Signer, Verifier};
@@ -61,35 +62,75 @@ impl Error for AggError {}
 
 //Circuit configuration for binary state constraint
 #[derive(Clone, Debug)]
-struct BinaryStateConfig { advice: Column<Advice>, selector: Selector }
+struct BinaryStateConfig {
+    advice: Column<Advice>,
+    selector: Selector,
+    instance: Column<Instance>, // for public inputs
+}
 
-//Circuit proving state is 0 or 1
+// Circuit proving state is 0 or 1
 #[derive(Clone, Debug)]
-struct BinaryStateCircuit { state: Value<Halo2Fr> }
+struct BinaryStateCircuit {
+    state: Value<Halo2Fr>,
+    pub c1: G1Affine,
+    pub c2: G1Affine,
+}
 
 impl Circuit<Halo2Fr> for BinaryStateCircuit {
     type Config = BinaryStateConfig;
     type FloorPlanner = SimpleFloorPlanner;
-    fn without_witnesses(&self) -> Self { Self { state: Value::unknown() } }
+
+    fn without_witnesses(&self) -> Self {
+        Self { 
+            state: Value::unknown(),
+            c1: self.c1,
+            c2: self.c2,
+        }
+    }
+
     fn configure(meta: &mut ConstraintSystem<Halo2Fr>) -> Self::Config {
         let advice = meta.advice_column();
         let selector = meta.selector();
+        let instance = meta.instance_column();
         meta.enable_equality(advice);
-        //Gate enforces: state * (state - 1) = 0, so state ∈ {0,1}
+        meta.enable_equality(instance); // so public inputs can be used
+
+        // Gate enforces: state * (state - 1) = 0
         meta.create_gate("binary constraint", |meta| {
             let s = meta.query_selector(selector);
             let state = meta.query_advice(advice, Rotation::cur());
             let one = halo2_proofs::plonk::Expression::Constant(Halo2Fr::ONE);
             vec![s * state.clone() * (state - one)]
         });
-        BinaryStateConfig { advice, selector }
+
+        BinaryStateConfig { advice, selector, instance }
     }
-    fn synthesize(&self, config: Self::Config, mut layouter: impl Layouter<Halo2Fr>) -> Result<(), Halo2Error> {
-        layouter.assign_region(|| "binary state proof", |mut region| {
+
+    fn synthesize(
+        &self,
+        config: Self::Config,
+        mut layouter: impl Layouter<Halo2Fr>,
+    ) -> Result<(), Halo2Error> {
+        // Assign private state
+        layouter.assign_region(|| "binary state", |mut region| {
             config.selector.enable(&mut region, 0)?;
             region.assign_advice(|| "state", config.advice, 0, || self.state)?;
             Ok(())
-        })
+        })?;
+
+        // Assign c1 and c2 as public inputs
+        layouter.constrain_instance(
+            config.instance,
+            0, // row 0 for c1
+            || Value::known(Halo2Fr::from_bytes(&self.c1.to_uncompressed().to_bytes()).unwrap()),
+        )?;
+        layouter.constrain_instance(
+            config.instance,
+            1, // row 1 for c2
+            || Value::known(Halo2Fr::from_bytes(&self.c2.to_uncompressed().to_bytes()).unwrap()),
+        )?;
+
+        Ok(())
     }
 }
 

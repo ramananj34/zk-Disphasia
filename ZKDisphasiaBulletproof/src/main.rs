@@ -206,6 +206,8 @@ impl IoTDevice {
         let commitment = self.pedersen_gens.commit(Scalar::from(state as u64), r);
         //Use a Merlin Transcript to generate a challenge
         let mut transcript = Transcript::new(b"iot-range-proof");
+        transcript.append_message(b"c1", c1.compress().as_bytes());
+        transcript.append_message(b"c2", c2.compress().as_bytes());
         //Generate the Bulletproof
         let (proof, _) = RangeProof::prove_single(&self.bulletproof_gens, &self.pedersen_gens, &mut transcript, state as u64, &r, 8).map_err(|e| { r.zeroize(); AggError::CryptoError(format!("Bulletproof failed: {:?}", e)) })?;
         //Safely delete the temporary scalar
@@ -289,6 +291,8 @@ impl IoTDevice {
             proof.elgamal_c1.0.as_bytes(), proof.elgamal_c2.0.as_bytes()], &proof.signature)?;
         //Now we deserialize the proof and verify it
         let mut transcript = Transcript::new(b"iot-range-proof");
+        transcript.append_message(b"c1", proof.elgamal_c1.0.as_bytes());
+        transcript.append_message(b"c2", proof.elgamal_c2.0.as_bytes());   
         RangeProof::from_bytes(&proof.bulletproof).map_err(|_| AggError::InvalidProof("Invalid bulletproof".into()))? //Decompression
             .verify_single(&self.bulletproof_gens, &self.pedersen_gens, &mut transcript, &proof.commitment.0, 8) //Verification
             .map_err(|_| AggError::InvalidProof("Bulletproof verification failed".into()))?; //Error Handling
