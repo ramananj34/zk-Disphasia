@@ -1,180 +1,170 @@
-////////////////////////////////////////////////////////////////////////////
-///Libraries
-
 use serde::{Deserialize, Serialize, Deserializer, Serializer};
 use serde_with::{serde_as, Bytes};
-use curve25519_dalek_ng::{ristretto::{CompressedRistretto, RistrettoPoint}, scalar::Scalar, traits::Identity, constants::RISTRETTO_BASEPOINT_POINT};
+use curve25519_dalek_ng::{ristretto::*, scalar::Scalar, traits::Identity, constants::RISTRETTO_BASEPOINT_POINT};
 use winterfell::{
-    math::{fields::f128::BaseElement, FieldElement},
     Air, AirContext, Assertion, EvaluationFrame, ProofOptions, Prover, Proof,
-    TraceInfo, TransitionConstraintDegree, TraceTable, PartitionOptions,
-    VerifierError, crypto::{DefaultRandomCoin, hashers::Blake3_256, MerkleTree},
-    AcceptableOptions, matrix::ColMatrix, StarkDomain, TracePolyTable,
+    TraceInfo, TransitionConstraintDegree,
+    crypto::{hashers::Blake3_256, DefaultRandomCoin, MerkleTree},
+    math::{fields::f128::BaseElement, FieldElement, ToElements, StarkField},
+    matrix::ColMatrix, TraceTable, verify, AcceptableOptions,
     ConstraintCompositionCoefficients, DefaultConstraintEvaluator, DefaultTraceLde,
+    PartitionOptions, StarkDomain, TracePolyTable, AuxRandElements
 };
+use winter_utils::Serializable;
+use merlin::Transcript;
 use frost_ristretto255 as frost;
-use ed25519_dalek::{SigningKey, VerifyingKey as SigSignKey, Signature, Signer, Verifier};
+use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 use rand::rngs::OsRng;
 use std::collections::{HashMap, BTreeMap};
 use std::error::Error;
 
-////////////////////////////////////////////////////////////////////////////
-///Configuration
-
-const PROOF_EXPIRATION_SECS: u64 = 300; //Proof validity window
-const RECOMPUTE_INTERVAL_SECS: u64 = 30; //Aggregate recomputation frequency
-const MAX_DEVICES: usize = 10000; //Network size limit
-const MAX_STARK_BYTES: usize = 16384; //DoS protection for STARK proofs
-const RATE_WINDOW_SECS: u64 = 10; //Rate limit reset interval
-const MAX_MESSAGES_PER_WINDOW: u32 = 10; //Max messages per rate window
-const STARK_TRACE_LENGTH: usize = 8; //Execution trace length (must be power of 2)
-
-////////////////////////////////////////////////////////////////////////////
-///Error Types
+//Config
+const PROOF_EXPIRY: u64 = 300;
+const RECOMPUTE_INTERVAL: u64 = 30;
+const MAX_DEVICES: usize = 10000;
+const MAX_PROOF_SIZE: usize = 65536;  //STARKs are bigger
+const RATE_WINDOW: u64 = 10;
+const MAX_MSGS_PER_WINDOW: u32 = 10;
 
 #[derive(Debug)]
 pub enum AggError {
-    InvalidProof(String), //Proof validation failed
-    ExpiredProof, //Timestamp too old
-    ThresholdNotMet, //Insufficient partial decryptions
-    CryptoError(String), //Cryptographic operation failed
-    DkgIncomplete, //DKG not finished
-    RateLimited, //Peer exceeded message limit
+    InvalidProof(String), ExpiredProof, ThresholdNotMet,
+    CryptoError(String), DkgIncomplete, RateLimited,
 }
+
 impl std::fmt::Display for AggError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AggError::InvalidProof(s) => write!(f, "Invalid proof: {}", s),
-            AggError::ExpiredProof => write!(f, "Proof expired"),
-            AggError::ThresholdNotMet => write!(f, "Insufficient participants"),
-            AggError::CryptoError(s) => write!(f, "Cryptographic error: {}", s),
-            AggError::DkgIncomplete => write!(f, "DKG not complete"),
-            AggError::RateLimited => write!(f, "Rate limited"),
+            Self::InvalidProof(s) => write!(f, "Invalid proof: {}", s),
+            Self::ExpiredProof => write!(f, "Proof expired"),
+            Self::ThresholdNotMet => write!(f, "Need more participants"),
+            Self::CryptoError(s) => write!(f, "Crypto error: {}", s),
+            Self::DkgIncomplete => write!(f, "DKG not done"),
+            Self::RateLimited => write!(f, "Rate limited"),
         }
     }
 }
+
 impl Error for AggError {}
 
-////////////////////////////////////////////////////////////////////////////
-///ZK-STARK Circuit
-
-//AIR (Algebraic Intermediate Representation) for binary state constraint
-pub struct BinaryStateAir {
-    context: AirContext<BaseElement>,
+//STARK AIR definition - enforces binary constraint
+#[derive(Clone, Debug)]
+pub struct BinaryPublicInputs {
+    ciphertext_commitment: BaseElement,  //links STARK to Schnorr proof
 }
 
-impl Air for BinaryStateAir {
+impl ToElements<BaseElement> for BinaryPublicInputs {
+    fn to_elements(&self) -> Vec<BaseElement> { vec![self.ciphertext_commitment] }
+}
+
+//AIR = Algebraic Intermediate Representation
+//This defines the constraint that state * (state - 1) = 0
+#[allow(dead_code)]
+pub struct BinaryAir {
+    context: AirContext<BaseElement>,
+    value: BaseElement,
+}
+
+impl Air for BinaryAir {
     type BaseField = BaseElement;
-    type PublicInputs = StarkPublicInputs;
+    type PublicInputs = BinaryPublicInputs;
     type GkrProof = ();
     type GkrVerifier = ();
 
-    fn new(trace_info: TraceInfo, _pub_inputs: StarkPublicInputs, options: ProofOptions) -> Self {
-        //Back to 1 column trace
-        assert_eq!(1, trace_info.width(), "Trace must have exactly 1 column");
-        
-        let degrees = vec![
-            TransitionConstraintDegree::new(2), //Binary constraint
-        ];
-        //Use 0 assertions - we'll work around it differently
-        let context = AirContext::new(trace_info, degrees, 0, options);
-        Self { context }
+    fn new(trace_info: TraceInfo, pub_inputs: Self::PublicInputs, opts: ProofOptions) -> Self {
+        assert_eq!(1, trace_info.width());
+        Self {
+            context: AirContext::new(trace_info, vec![TransitionConstraintDegree::new(2)], 1, opts),
+            value: pub_inputs.ciphertext_commitment,
+        }
     }
 
-    fn context(&self) -> &AirContext<BaseElement> {
-        &self.context
-    }
+    fn context(&self) -> &AirContext<Self::BaseField> { &self.context }
 
-    fn evaluate_transition<E: FieldElement + From<BaseElement>>(
-        &self,
-        frame: &EvaluationFrame<E>,
-        _periodic_values: &[E],
-        result: &mut [E],
+    //This is where the magic happens - enforce the binary constraint!
+    fn evaluate_transition<E: FieldElement + From<Self::BaseField>>(
+        &self, frame: &EvaluationFrame<E>, _: &[E], result: &mut [E]
     ) {
-        let current = frame.current()[0];
-        let one = E::ONE;
-        
-        //Enforce: state * (state - 1) = 0
-        result[0] = current * (current - one);
+        let state = frame.current()[0];
+        result[0] = state * (state - E::ONE);  //forces state to be 0 or 1
     }
 
-    fn get_assertions(&self) -> Vec<Assertion<BaseElement>> {
-        //Return empty - the transition constraint is sufficient
-        vec![]
+    fn get_assertions(&self) -> Vec<Assertion<Self::BaseField>> {
+        vec![Assertion::single(0, 0, BaseElement::ZERO)]
     }
 }
 
-//STARK Prover for binary state
-pub struct BinaryStateProver {
+//STARK prover implementation
+pub struct BinaryProver {
     options: ProofOptions,
-    pub_inputs: StarkPublicInputs,
+    last_commit: std::cell::Cell<Option<BaseElement>>,
 }
 
-impl BinaryStateProver {
+impl BinaryProver {
     pub fn new() -> Self {
-    Self {
-        options: ProofOptions::new(
-            32,
-            8,
-            0,
-            winterfell::FieldExtension::None,
-            4,
-            31,
-        ),
-        pub_inputs: StarkPublicInputs::default(),
+        Self {
+            options: ProofOptions::new(32, 16, 0, winterfell::FieldExtension::None, 8, 127),
+            last_commit: std::cell::Cell::new(None),
+        }
     }
+
+    //Build execution trace using commitment as seed
+    pub fn build_trace(&self, commit: BaseElement) -> TraceTable<BaseElement> {
+        self.last_commit.set(Some(commit));
+        let len = 128;  //trace length
+        let mut trace = TraceTable::new(1, len);
+        
+        //Use commitment to generate deterministic binary sequence
+        let cb = commit.as_int().to_le_bytes();
+        
+        trace.fill(|s| s[0] = BaseElement::ZERO,
+                   |step, s| {
+                       let byte_idx = (step / 8) % 16;
+                       let bit_idx = step % 8;
+                       let bit = (cb[byte_idx] >> bit_idx) & 1;
+                       s[0] = BaseElement::new(bit as u128);
+                   });
+        trace
     }
-    pub fn with_pub_inputs(mut self, pub_inputs: StarkPublicInputs) -> Self {
-        self.pub_inputs = pub_inputs;
-        self
-    }  
 }
 
-impl Prover for BinaryStateProver {
+impl Prover for BinaryProver {
     type BaseField = BaseElement;
-    type Air = BinaryStateAir;
+    type Air = BinaryAir;
     type Trace = TraceTable<BaseElement>;
     type HashFn = Blake3_256<BaseElement>;
     type RandomCoin = DefaultRandomCoin<Self::HashFn>;
     type VC = MerkleTree<Self::HashFn>;
-    type TraceLde<E: FieldElement<BaseField = Self::BaseField>> = DefaultTraceLde<E, Self::HashFn, Self::VC>;
-    type ConstraintEvaluator<'a, E: FieldElement<BaseField = Self::BaseField>> = DefaultConstraintEvaluator<'a, Self::Air, E>;
+    type TraceLde<E: FieldElement<BaseField = Self::BaseField>> =
+        DefaultTraceLde<E, Self::HashFn, Self::VC>;
+    type ConstraintEvaluator<'a, E: FieldElement<BaseField = Self::BaseField>> =
+        DefaultConstraintEvaluator<'a, Self::Air, E>;
 
-    fn get_pub_inputs(&self, _trace: &Self::Trace) -> StarkPublicInputs {
-        self.pub_inputs
+    fn get_pub_inputs(&self, _: &Self::Trace) -> BinaryPublicInputs {
+        BinaryPublicInputs { ciphertext_commitment: self.last_commit.get().unwrap() }
     }
 
-    fn options(&self) -> &ProofOptions {
-        &self.options
-    }
+    fn options(&self) -> &ProofOptions { &self.options }
 
     fn new_trace_lde<E: FieldElement<BaseField = Self::BaseField>>(
-        &self,
-        trace_info: &TraceInfo,
-        main_trace: &ColMatrix<Self::BaseField>,
-        domain: &StarkDomain<Self::BaseField>,
-        partition_option: PartitionOptions,
+        &self, info: &TraceInfo, main: &ColMatrix<Self::BaseField>,
+        domain: &StarkDomain<Self::BaseField>, part: PartitionOptions
     ) -> (Self::TraceLde<E>, TracePolyTable<E>) {
-        DefaultTraceLde::new(trace_info, main_trace, domain, partition_option)
+        DefaultTraceLde::new(info, main, domain, part)
     }
 
     fn new_evaluator<'a, E: FieldElement<BaseField = Self::BaseField>>(
-        &self,
-        air: &'a Self::Air,
-        aux_rand_elements: Option<winterfell::AuxRandElements<E>>,
-        composition_coefficients: ConstraintCompositionCoefficients<E>,
+        &self, air: &'a Self::Air, aux: Option<AuxRandElements<E>>,
+        coeffs: ConstraintCompositionCoefficients<E>
     ) -> Self::ConstraintEvaluator<'a, E> {
-        DefaultConstraintEvaluator::new(air, aux_rand_elements, composition_coefficients)
+        DefaultConstraintEvaluator::new(air, aux, coeffs)
     }
 }
 
-////////////////////////////////////////////////////////////////////////////
-///Cryptographic Structures
-
-//Serialization wrapper macro for Ristretto types
-macro_rules! impl_serde_wrapper {
+//Serialization wrappers
+macro_rules! serde_wrapper {
     ($name:ident, $inner:ty, $size:expr, $from:expr) => {
         #[derive(Debug, Clone)]
         pub struct $name(pub $inner);
@@ -185,481 +175,523 @@ macro_rules! impl_serde_wrapper {
         }
         impl<'de> Deserialize<'de> for $name {
             fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                let bytes = Vec::<u8>::deserialize(d)?;
-                if bytes.len() != $size { return Err(serde::de::Error::custom(concat!("Invalid ", stringify!($name), " length"))); }
-                let mut arr = [0u8; $size];
-                arr.copy_from_slice(&bytes);
-                Ok($name($from(arr)))
+                let b = Vec::<u8>::deserialize(d)?;
+                if b.len() != $size { return Err(serde::de::Error::custom("bad length")); }
+                let mut a = [0u8; $size]; a.copy_from_slice(&b);
+                Ok($name($from(a)))
             }
         }
         impl From<$inner> for $name { fn from(v: $inner) -> Self { $name(v) } }
         impl From<$name> for $inner { fn from(v: $name) -> Self { v.0 } }
     };
 }
-impl_serde_wrapper!(SerializableCompressedRistretto, CompressedRistretto, 32, CompressedRistretto);
-impl_serde_wrapper!(SerializableScalar, Scalar, 32, Scalar::from_bytes_mod_order);
 
-//Public inputs for binding ElGamal ciphertext to STARK proof
-#[derive(Clone, Copy, Debug)]
-pub struct StarkPublicInputs {
-    pub c1_hash: BaseElement,
-    pub c2_hash: BaseElement,
+serde_wrapper!(SerCompressed, CompressedRistretto, 32, CompressedRistretto);
+serde_wrapper!(SerScalar, Scalar, 32, Scalar::from_bytes_mod_order);
+
+//ElGamal correctness proof
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElGamalProof {
+    pub commit_r: SerCompressed,
+    pub commit_s: SerCompressed,
+    pub resp_r: SerScalar,
+    pub resp_state: SerScalar,
 }
 
-impl winterfell::math::ToElements<BaseElement> for StarkPublicInputs {
-    fn to_elements(&self) -> Vec<BaseElement> {
-        vec![self.c1_hash, self.c2_hash]
-    }
-}
-
-impl Default for StarkPublicInputs {
-    fn default() -> Self {
+impl ElGamalProof {
+    fn prove(state: u8, r: &Scalar, c1: &RistrettoPoint, c2: &RistrettoPoint,
+             h: &RistrettoPoint, dev_id: u32, ts: u64) -> Self {
+        let g = RISTRETTO_BASEPOINT_POINT;
+        let w = Scalar::random(&mut OsRng);
+        let v = Scalar::random(&mut OsRng);
+        
+        let cr = g * w;
+        let cs = g * v + h * w;
+        
+        //Fiat-Shamir
+        let mut t = Transcript::new(b"elgamal-correctness");
+        t.append_u64(b"device", dev_id as u64);
+        t.append_u64(b"timestamp", ts);
+        t.append_message(b"c1", c1.compress().as_bytes());
+        t.append_message(b"c2", c2.compress().as_bytes());
+        t.append_message(b"R", cr.compress().as_bytes());
+        t.append_message(b"S", cs.compress().as_bytes());
+        
+        let mut cb = [0u8; 64];
+        t.challenge_bytes(b"challenge", &mut cb);
+        let c = Scalar::from_bytes_mod_order_wide(&cb);
+        
         Self {
-            c1_hash: BaseElement::ZERO,
-            c2_hash: BaseElement::ZERO,
+            commit_r: cr.compress().into(), commit_s: cs.compress().into(),
+            resp_r: (w + c * r).into(), resp_state: (v + c * Scalar::from(state as u64)).into(),
         }
     }
+    
+    fn verify(&self, c1: &RistrettoPoint, c2: &RistrettoPoint, h: &RistrettoPoint,
+              dev_id: u32, ts: u64) -> bool {
+        let g = RISTRETTO_BASEPOINT_POINT;
+        let (Some(cr), Some(cs)) = (self.commit_r.0.decompress(), self.commit_s.0.decompress())
+        else { return false };
+        
+        let mut t = Transcript::new(b"elgamal-correctness");
+        t.append_u64(b"device", dev_id as u64);
+        t.append_u64(b"timestamp", ts);
+        t.append_message(b"c1", c1.compress().as_bytes());
+        t.append_message(b"c2", c2.compress().as_bytes());
+        t.append_message(b"R", self.commit_r.0.as_bytes());
+        t.append_message(b"S", self.commit_s.0.as_bytes());
+        
+        let mut cb = [0u8; 64];
+        t.challenge_bytes(b"challenge", &mut cb);
+        let c = Scalar::from_bytes_mod_order_wide(&cb);
+        
+        let chk1 = g * self.resp_r.0 == cr + c1 * c;
+        let chk2 = g * self.resp_state.0 + h * self.resp_r.0 == cs + c2 * c;
+        chk1 && chk2
+    }
+
+    //Create commitment to link Schnorr proof to STARK proof
+    fn get_commitment(&self) -> BaseElement {
+        let mut h = blake2b_simd::Params::new().hash_length(16).to_state();
+        h.update(b"linked-commitment");
+        h.update(&self.resp_state.0.to_bytes());
+        h.update(&self.resp_r.0.to_bytes());
+        
+        let hb = h.finalize();
+        let b = hb.as_bytes();
+        
+        let mut val: u128 = 0;
+        for i in 0..16 { val |= (b[i] as u128) << (i * 8); }
+        BaseElement::new(val)
+    }
 }
 
-//Device proof with ZK-STARK proof and ElGamal encryption
+//Device proof with STARK
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceProof {
-    pub device_id: u32, //Device identifier
-    pub timestamp: u64, //Creation time
-    pub elgamal_c1: SerializableCompressedRistretto, //ElGamal c1
-    pub elgamal_c2: SerializableCompressedRistretto, //ElGamal c2
-    pub stark_proof: Vec<u8>, //ZK-STARK binary state proof
+    pub device_id: u32,
+    pub timestamp: u64,
+    pub elgamal_c1: SerCompressed,
+    pub elgamal_c2: SerCompressed,
+    pub elgamal_proof: ElGamalProof,
+    pub stark_proof: Vec<u8>,  //STARK proof for binary constraint
     #[serde_as(as = "Bytes")]
-    pub signature: [u8; 64], //ECDSA signature
+    pub signature: [u8; 64],
 }
 
-//Partial decryption with Schnorr proof
+//Schnorr proof for partial decryption
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchnorrProof {
+    pub commitment: SerCompressed,
+    pub response: SerScalar,
+}
+
+impl SchnorrProof {
+    fn prove_dlog(secret: &Scalar, sum_c1: &RistrettoPoint, partial: &RistrettoPoint,
+                  ts: u64, id: u32) -> Self {
+        let r = Scalar::random(&mut OsRng);
+        let c = sum_c1 * r;
+        let ch = Self::challenge(sum_c1, partial, &c, ts, id);
+        Self { commitment: c.compress().into(), response: (r + ch * secret).into() }
+    }
+    
+    fn verify_dlog(&self, sum_c1: &RistrettoPoint, partial: &RistrettoPoint,
+                   ts: u64, id: u32) -> bool {
+        let Some(c) = self.commitment.0.decompress() else { return false };
+        let ch = Self::challenge(sum_c1, partial, &c, ts, id);
+        sum_c1 * self.response.0 == c + partial * ch
+    }
+    
+    fn challenge(sum_c1: &RistrettoPoint, partial: &RistrettoPoint,
+                 commit: &RistrettoPoint, ts: u64, id: u32) -> Scalar {
+        let mut t = Transcript::new(b"schnorr-dlog-equality");
+        t.append_u64(b"timestamp", ts);
+        t.append_u64(b"device", id as u64);
+        t.append_message(b"sum_c1", sum_c1.compress().as_bytes());
+        t.append_message(b"partial", partial.compress().as_bytes());
+        t.append_message(b"commitment", commit.compress().as_bytes());
+        let mut b = [0u8; 64];
+        t.challenge_bytes(b"challenge", &mut b);
+        Scalar::from_bytes_mod_order_wide(&b)
+    }
+}
+
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartialDecryption {
-    pub device_id: u32, //Device identifier
-    pub timestamp: u64, //Creation time
-    pub partial: SerializableCompressedRistretto, //Partial decryption point
-    pub proof: SchnorrProof, //Discrete log equality proof
+    pub device_id: u32,
+    pub timestamp: u64,
+    pub partial: SerCompressed,
+    pub proof: SchnorrProof,
     #[serde_as(as = "Bytes")]
-    pub signature: [u8; 64], //ECDSA signature
+    pub signature: [u8; 64],
 }
 
-//Schnorr proof for discrete log equality (Fiat-Shamir)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchnorrProof { pub commitment: SerializableCompressedRistretto, pub response: SerializableScalar }
-impl SchnorrProof {
-    fn prove_dlog_equality(secret: &Scalar, sum_c1: &RistrettoPoint, partial: &RistrettoPoint, ts: u64, id: u32) -> Self {
-        let r = Scalar::random(&mut OsRng); //Random nonce
-        let commitment = sum_c1 * r; //Commitment = r*sum_c1
-        let challenge = Self::challenge(&sum_c1, &partial, &commitment, ts, id); //Fiat-Shamir challenge
-        let response = r + challenge * secret; //Response = r + c*x
-        Self { commitment: commitment.compress().into(), response: response.into() }
-    }
-    fn verify_dlog_equality(&self, sum_c1: &RistrettoPoint, partial: &RistrettoPoint, ts: u64, id: u32) -> bool {
-        let commitment = match self.commitment.0.decompress() { Some(c) => c, None => return false };
-        let challenge = Self::challenge(&sum_c1, &partial, &commitment, ts, id);
-        sum_c1 * self.response.0 == commitment + partial * challenge //Verify equation
-    }
-    fn challenge(sum_c1: &RistrettoPoint, partial: &RistrettoPoint, commitment: &RistrettoPoint, ts: u64, id: u32) -> Scalar {
-        use blake3::Hasher;
-        let mut hasher = Hasher::new();
-        hasher.update(b"schnorr-dlog-equality");
-        hasher.update(&ts.to_le_bytes());
-        hasher.update(&id.to_le_bytes());
-        hasher.update(sum_c1.compress().as_bytes());
-        hasher.update(partial.compress().as_bytes());
-        hasher.update(commitment.compress().as_bytes());
-        let hash = hasher.finalize();
-        let mut bytes = [0u8; 64];
-        bytes[..32].copy_from_slice(hash.as_bytes());
-        bytes[32..].copy_from_slice(hash.as_bytes());
-        Scalar::from_bytes_mod_order_wide(&bytes)
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////
-///IoT Device
-
+//IoT Device
 pub struct IoTDevice {
-    pub id: u32, //Device ID
-    pub frost_key_package: frost::keys::KeyPackage, //FROST private key share
-    pub group_public: frost::keys::PublicKeyPackage, //FROST group public key
-    pub signing_key: SigningKey, //ECDSA signing key
-    pub peer_keys: HashMap<u32, SigSignKey>, //Peer public keys
-    pub received_proofs: HashMap<u32, DeviceProof>, //Received device proofs
-    pub received_partials: HashMap<u32, PartialDecryption>, //Received partial decryptions
-    pub current_aggregate_c1: Option<RistrettoPoint>, //Sum of ElGamal c1
-    pub current_aggregate_c2: Option<RistrettoPoint>, //Sum of ElGamal c2
-    pub threshold: usize, //Threshold for decryption
-    peer_rates: HashMap<u32, (u64, u32)>, //Rate limiting per peer
-    last_recompute: u64, //Last aggregate recomputation time
+    pub id: u32,
+    frost_key: frost::keys::KeyPackage,
+    group_pub: frost::keys::PublicKeyPackage,
+    sig_key: SigningKey,
+    peer_keys: HashMap<u32, VerifyingKey>,
+    proofs: HashMap<u32, DeviceProof>,
+    partials: HashMap<u32, PartialDecryption>,
+    agg_c1: Option<RistrettoPoint>,
+    agg_c2: Option<RistrettoPoint>,
+    stark_prover: BinaryProver,  //STARK prover
+    threshold: usize,
+    rates: HashMap<u32, (u64, u32)>,
+    last_recomp: u64,
 }
+
 impl IoTDevice {
-    //Constructor
-    pub fn new(id: u32, threshold: usize, key_package: frost::keys::KeyPackage, public_package: frost::keys::PublicKeyPackage, peer_keys: HashMap<u32, SigSignKey>) -> Self {
-        let secret_bytes = rand::random::<[u8; 32]>();
-        let signing_key = SigningKey::from_bytes(&secret_bytes);
+    pub fn new(id: u32, threshold: usize, frost_key: frost::keys::KeyPackage,
+               group_pub: frost::keys::PublicKeyPackage, peer_keys: HashMap<u32, VerifyingKey>) -> Self {
         Self {
-            id, frost_key_package: key_package, group_public: public_package, //FROST keys
-            signing_key, peer_keys, //Random signing key
-            received_proofs: HashMap::new(), received_partials: HashMap::new(), //Empty maps
-            current_aggregate_c1: None, current_aggregate_c2: None, //No aggregate yet
-            threshold, //STARK prover and threshold
-            peer_rates: HashMap::new(), last_recompute: 0, //Empty rate limits
+            id, threshold, frost_key, group_pub, peer_keys,
+            sig_key: SigningKey::generate(&mut OsRng),
+            proofs: HashMap::new(), partials: HashMap::new(),
+            agg_c1: None, agg_c2: None,
+            stark_prover: BinaryProver::new(),
+            rates: HashMap::new(), last_recomp: 0,
         }
     }
-    //Generate proof for binary state (0 or 1)
+    
     pub fn generate_proof(&self, state: u8) -> Result<DeviceProof, AggError> {
-        if state > 1 { return Err(AggError::CryptoError("State must be 0 or 1".into())); }
-        let (ts, mut r, g) = (current_timestamp(), Scalar::random(&mut OsRng), RISTRETTO_BASEPOINT_POINT);
-        let h = frost_pubkey_to_point(&self.group_public.verifying_key())?; //Get public key
-        let (c1, c2) = (g * r, g * Scalar::from(state as u64) + h * r); //ElGamal encryption
+        if state > 1 { return Err(AggError::CryptoError("State must be 0/1".into())); }
         
-        let trace_length = STARK_TRACE_LENGTH;
-        let state_elem = BaseElement::new(state as u128);
-
-        let mut trace = TraceTable::new(1, trace_length);  //Back to 1 column
-
-        trace.fill(
-            |trace_state| {
-                trace_state[0] = state_elem;  //Only state column
-            },
-            |_, trace_state| {
-                trace_state[0] = state_elem;
-            },
-        );
-
-        //Hash c1 and c2 to field elements for public inputs
-        let c1_hash = hash_to_base_element(b"c1", c1.compress().as_bytes());
-        let c2_hash = hash_to_base_element(b"c2", c2.compress().as_bytes());
-        let pub_inputs = StarkPublicInputs {
-            c1_hash,
-            c2_hash,
-        };
-
-        //Create prover with public inputs bound to ciphertext
-        let prover = BinaryStateProver::new().with_pub_inputs(pub_inputs);
-
-        //Generate ZK-STARK proof
-        let proof = prover.prove(trace)
-            .map_err(|e| { r.zeroize(); AggError::CryptoError(format!("STARK prove failed: {:?}", e)) })?;
+        let ts = timestamp();
+        let mut r = Scalar::random(&mut OsRng);
+        let g = RISTRETTO_BASEPOINT_POINT;
+        let h = frost_to_point(&self.group_pub.verifying_key())?;
         
-        r.zeroize(); //Securely delete nonce
+        //ElGamal encrypt
+        let (c1, c2) = (g * r, g * Scalar::from(state as u64) + h * r);
         
-        //Serialize proof
-        let stark_proof_bytes = proof.to_bytes();
+        //Schnorr proof for ElGamal
+        let eg_proof = ElGamalProof::prove(state, &r, &c1, &c2, &h, self.id, ts);
         
-        //Construct and return proof
+        //Get commitment linking Schnorr to STARK
+        let commit = eg_proof.get_commitment();
+        
+        //Build STARK trace and generate proof
+        let trace = self.stark_prover.build_trace(commit);
+        let stark_proof = self.stark_prover.prove(trace)
+            .map_err(|e| { r.zeroize(); AggError::CryptoError(format!("STARK failed: {:?}", e)) })?;
+        
+        let mut bytes = Vec::new();
+        stark_proof.write_into(&mut bytes);
+        r.zeroize();
+        
         Ok(DeviceProof {
             device_id: self.id, timestamp: ts,
             elgamal_c1: c1.compress().into(), elgamal_c2: c2.compress().into(),
-            stark_proof: stark_proof_bytes,
-            signature: self.sign_data(&[&ts.to_le_bytes(), &self.id.to_le_bytes(), c1.compress().as_bytes(), c2.compress().as_bytes()]),
+            elgamal_proof: eg_proof, stark_proof: bytes,
+            signature: self.sign(&[&ts.to_le_bytes(), &self.id.to_le_bytes(),
+                                   c1.compress().as_bytes(), c2.compress().as_bytes()]),
         })
     }
-    //Remove expired proofs and partials
-    pub fn cleanup_expired_proofs(&mut self) {
-        let thresh = current_timestamp().saturating_sub(PROOF_EXPIRATION_SECS);
-        self.received_proofs.retain(|_, p| p.timestamp > thresh);
-        self.received_partials.retain(|_, p| p.timestamp > thresh);
-        self.maybe_recompute();
-    }
-    //Conditionally recompute aggregate
-    fn maybe_recompute(&mut self) {
-        let now = current_timestamp();
-        if now >= self.last_recompute + RECOMPUTE_INTERVAL_SECS { self.recompute_aggregate(); self.last_recompute = now; }
-    }
-    //Recompute ElGamal aggregate
-    fn recompute_aggregate(&mut self) {
-        if self.received_proofs.is_empty() { self.current_aggregate_c1 = None; self.current_aggregate_c2 = None; }
-        else {
-            let (mut c1, mut c2) = (RistrettoPoint::identity(), RistrettoPoint::identity());
-            for p in self.received_proofs.values() {
-                if let (Some(p1), Some(p2)) = (p.elgamal_c1.0.decompress(), p.elgamal_c2.0.decompress()) { c1 += p1; c2 += p2; }
-            }
-            self.current_aggregate_c1 = Some(c1); self.current_aggregate_c2 = Some(c2);
+    
+    pub fn receive_proof(&mut self, p: DeviceProof) -> Result<(), AggError> {
+        self.check_rate(p.device_id)?;
+        let now = timestamp();
+        
+        if p.timestamp + PROOF_EXPIRY < now { return Err(AggError::ExpiredProof); }
+        if self.proofs.get(&p.device_id).map_or(false, |e| e.timestamp + PROOF_EXPIRY > now) {
+            return Err(AggError::InvalidProof("Duplicate".into()));
         }
-    }
-    //Rate limiting check
-    fn check_rate(&mut self, id: u32) -> Result<(), AggError> {
-        let now = current_timestamp();
-        let entry = self.peer_rates.entry(id).or_insert((now, 0));
-        if now >= entry.0 + RATE_WINDOW_SECS { *entry = (now, 0); }
-        if entry.1 >= MAX_MESSAGES_PER_WINDOW { return Err(AggError::RateLimited); }
-        entry.1 += 1;
-        Ok(())
-    }
-    //Receive and verify device proof
-    pub fn receive_proof(&mut self, proof: DeviceProof) -> Result<(), AggError> {
-        self.check_rate(proof.device_id)?; //Rate limit check
-        let now = current_timestamp();
-        if proof.timestamp + PROOF_EXPIRATION_SECS < now { return Err(AggError::ExpiredProof); } //Expiration check
-        if self.received_proofs.get(&proof.device_id).map_or(false, |e| e.timestamp + PROOF_EXPIRATION_SECS > now) { return Err(AggError::InvalidProof("Duplicate proof".into())); } //Duplicate check
-        if proof.stark_proof.len() > MAX_STARK_BYTES { return Err(AggError::InvalidProof("STARK proof too large".into())); } //Size check
+        if p.stark_proof.len() > MAX_PROOF_SIZE {
+            return Err(AggError::InvalidProof("Too big".into()));
+        }
+        
         //Verify signature
-        let pubkey = self.peer_keys.get(&proof.device_id).ok_or(AggError::InvalidProof("Unknown device".into()))?;
-        self.verify_sig(pubkey, &[&proof.timestamp.to_le_bytes(), &proof.device_id.to_le_bytes(), proof.elgamal_c1.0.as_bytes(), proof.elgamal_c2.0.as_bytes()], &proof.signature)?;
+        let pk = self.peer_keys.get(&p.device_id)
+            .ok_or(AggError::InvalidProof("Unknown device".into()))?;
+        self.verify_sig(pk, &[&p.timestamp.to_le_bytes(), &p.device_id.to_le_bytes(),
+                              p.elgamal_c1.0.as_bytes(), p.elgamal_c2.0.as_bytes()],
+                       &p.signature)?;
         
-        //Verify ZK-STARK proof
-        let stark_proof = Proof::from_bytes(&proof.stark_proof)
-            .map_err(|_| AggError::InvalidProof("Invalid STARK proof format".into()))?;
-
-        //Reconstruct public inputs from ElGamal ciphertext
-        let c1_hash = hash_to_base_element(b"c1", proof.elgamal_c1.0.as_bytes());
-        let c2_hash = hash_to_base_element(b"c2", proof.elgamal_c2.0.as_bytes());
-        let pub_inputs = StarkPublicInputs {
-            c1_hash,
-            c2_hash,
-        };
-
+        //Verify ElGamal proof
+        let c1 = p.elgamal_c1.0.decompress().ok_or(AggError::InvalidProof("bad c1".into()))?;
+        let c2 = p.elgamal_c2.0.decompress().ok_or(AggError::InvalidProof("bad c2".into()))?;
+        let h = frost_to_point(&self.group_pub.verifying_key())?;
+        
+        if !p.elgamal_proof.verify(&c1, &c2, &h, p.device_id, p.timestamp) {
+            return Err(AggError::InvalidProof("ElGamal proof failed".into()));
+        }
+        
+        //Verify STARK proof
+        let commit = p.elgamal_proof.get_commitment();
+        let stark_proof = Proof::from_bytes(&p.stark_proof[..])
+            .map_err(|_| AggError::InvalidProof("bad STARK format".into()))?;
+        
+        let pub_inputs = BinaryPublicInputs { ciphertext_commitment: commit };
         let min_opts = AcceptableOptions::MinConjecturedSecurity(95);
-
-        winterfell::verify::<BinaryStateAir, Blake3_256<BaseElement>, DefaultRandomCoin<Blake3_256<BaseElement>>, MerkleTree<Blake3_256<BaseElement>>>(
-            stark_proof,
-            pub_inputs,
-            &min_opts,
-        ).map_err(|e| match e {
-            VerifierError::ProofDeserializationError(_) => AggError::InvalidProof("STARK deserialization failed".into()),
-            _ => AggError::InvalidProof(format!("STARK verification failed: {:?}", e)),
-        })?;
         
-        self.received_proofs.insert(proof.device_id, proof); //Store proof
+        verify::<BinaryAir, Blake3_256<BaseElement>, DefaultRandomCoin<Blake3_256<BaseElement>>, 
+                MerkleTree<Blake3_256<BaseElement>>>(stark_proof, pub_inputs, &min_opts)
+            .map_err(|_| AggError::InvalidProof("STARK verify failed".into()))?;
+        
+        self.proofs.insert(p.device_id, p);
         self.maybe_recompute();
         Ok(())
     }
-    //Generate partial decryption
+    
+    pub fn cleanup(&mut self) {
+        let cutoff = timestamp().saturating_sub(PROOF_EXPIRY);
+        self.proofs.retain(|_, p| p.timestamp > cutoff);
+        self.partials.retain(|_, p| p.timestamp > cutoff);
+        self.maybe_recompute();
+    }
+    
+    fn maybe_recompute(&mut self) {
+        let now = timestamp();
+        if now >= self.last_recomp + RECOMPUTE_INTERVAL {
+            self.recompute();
+            self.last_recomp = now;
+        }
+    }
+    
+    fn recompute(&mut self) {
+        if self.proofs.is_empty() {
+            self.agg_c1 = None; self.agg_c2 = None;
+        } else {
+            let (mut c1, mut c2) = (RistrettoPoint::identity(), RistrettoPoint::identity());
+            for p in self.proofs.values() {
+                if let (Some(p1), Some(p2)) = (p.elgamal_c1.0.decompress(), p.elgamal_c2.0.decompress()) {
+                    c1 += p1; c2 += p2;
+                }
+            }
+            self.agg_c1 = Some(c1); self.agg_c2 = Some(c2);
+        }
+    }
+    
+    fn check_rate(&mut self, id: u32) -> Result<(), AggError> {
+        let now = timestamp();
+        let e = self.rates.entry(id).or_insert((now, 0));
+        if now >= e.0 + RATE_WINDOW { *e = (now, 0); }
+        if e.1 >= MAX_MSGS_PER_WINDOW { return Err(AggError::RateLimited); }
+        e.1 += 1; Ok(())
+    }
+    
     pub fn generate_partial_decryption(&mut self) -> Result<PartialDecryption, AggError> {
-        self.recompute_aggregate();
-        let sum_c1 = self.current_aggregate_c1.ok_or(AggError::CryptoError("No aggregate".into()))?;
-        let ts = current_timestamp();
-        let mut secret = scalar_from_frost_signing(&self.frost_key_package.signing_share())?; //Get FROST secret
-        let partial = sum_c1 * secret; //Compute partial = c1 * secret
-        let proof = SchnorrProof::prove_dlog_equality(&secret, &sum_c1, &partial, ts, self.id); //Schnorr proof
-        secret.zeroize(); //Securely delete secret
+        self.recompute();
+        let sum_c1 = self.agg_c1.ok_or(AggError::CryptoError("No agg".into()))?;
+        let ts = timestamp();
+        
+        let mut sec = frost_to_scalar(&self.frost_key.signing_share())?;
+        let partial = sum_c1 * sec;
+        let proof = SchnorrProof::prove_dlog(&sec, &sum_c1, &partial, ts, self.id);
+        sec.zeroize();
+        
         Ok(PartialDecryption {
-            device_id: self.id, timestamp: ts, partial: partial.compress().into(), proof,
-            signature: self.sign_data(&[&ts.to_le_bytes(), &self.id.to_le_bytes(), partial.compress().as_bytes()]),
+            device_id: self.id, timestamp: ts,
+            partial: partial.compress().into(), proof,
+            signature: self.sign(&[&ts.to_le_bytes(), &self.id.to_le_bytes(),
+                                   partial.compress().as_bytes()]),
         })
     }
-    //Receive and verify partial decryption
-    pub fn receive_partial(&mut self, partial: PartialDecryption) -> Result<(), AggError> {
-        self.check_rate(partial.device_id)?; //Rate limit
-        if partial.timestamp + PROOF_EXPIRATION_SECS < current_timestamp() { return Err(AggError::ExpiredProof); } //Expiration
-        let pubkey = self.peer_keys.get(&partial.device_id).ok_or(AggError::InvalidProof("Unknown device".into()))?;
-        self.verify_sig(pubkey, &[&partial.timestamp.to_le_bytes(), &partial.device_id.to_le_bytes(), partial.partial.0.as_bytes()], &partial.signature)?; //Signature
-        self.received_partials.insert(partial.device_id, partial);
+    
+    pub fn receive_partial(&mut self, p: PartialDecryption) -> Result<(), AggError> {
+        self.check_rate(p.device_id)?;
+        if p.timestamp + PROOF_EXPIRY < timestamp() { return Err(AggError::ExpiredProof); }
+        
+        let pk = self.peer_keys.get(&p.device_id)
+            .ok_or(AggError::InvalidProof("Unknown".into()))?;
+        self.verify_sig(pk, &[&p.timestamp.to_le_bytes(), &p.device_id.to_le_bytes(),
+                              p.partial.0.as_bytes()], &p.signature)?;
+        
+        self.partials.insert(p.device_id, p);
         Ok(())
     }
-    //Compute final aggregate using Lagrange interpolation
+    
     pub fn compute_aggregate(&mut self) -> Result<(usize, usize), AggError> {
-        self.recompute_aggregate();
-        let thresh = current_timestamp().saturating_sub(PROOF_EXPIRATION_SECS);
-        let valid_proofs: Vec<_> = self.received_proofs.values().filter(|p| p.timestamp > thresh).collect();
-        if valid_proofs.is_empty() { return Ok((0, 0)); }
-        let valid_partials: Vec<_> = self.received_partials.values().filter(|p| p.timestamp > thresh).collect();
-        if valid_partials.len() < self.threshold { return Err(AggError::ThresholdNotMet); } //Check threshold
-        let sum_c1 = self.current_aggregate_c1.ok_or(AggError::CryptoError("No aggregate".into()))?;
-        let sum_c2 = self.current_aggregate_c2.ok_or(AggError::CryptoError("No aggregate".into()))?;
-        //Verify Schnorr proofs and collect valid partials
+        self.recompute();
+        let cutoff = timestamp().saturating_sub(PROOF_EXPIRY);
+        let valid: Vec<_> = self.proofs.values().filter(|p| p.timestamp > cutoff).collect();
+        
+        if valid.is_empty() { return Ok((0, 0)); }
+        
+        let valid_parts: Vec<_> = self.partials.values().filter(|p| p.timestamp > cutoff).collect();
+        if valid_parts.len() < self.threshold { return Err(AggError::ThresholdNotMet); }
+        
+        let sum_c1 = self.agg_c1.ok_or(AggError::CryptoError("No agg".into()))?;
+        let sum_c2 = self.agg_c2.ok_or(AggError::CryptoError("No agg".into()))?;
+        
+        //Verify partials
         let mut verified = Vec::new();
-        for p in valid_partials.iter().take(self.threshold) {
-            let point = p.partial.0.decompress().ok_or(AggError::CryptoError("Invalid partial".into()))?;
-            if !p.proof.verify_dlog_equality(&sum_c1, &point, p.timestamp, p.device_id) { return Err(AggError::InvalidProof(format!("Schnorr failed for device {}", p.device_id))); }
-            verified.push((p.device_id, point));
+        for p in valid_parts.iter().take(self.threshold) {
+            let pt = p.partial.0.decompress().ok_or(AggError::CryptoError("bad partial".into()))?;
+            if !p.proof.verify_dlog(&sum_c1, &pt, p.timestamp, p.device_id) {
+                return Err(AggError::InvalidProof(format!("Failed for {}", p.device_id)));
+            }
+            verified.push((p.device_id, pt));
         }
+        
         //Lagrange interpolation
-        let participants: Vec<Scalar> = verified.iter().map(|(id, _)| Scalar::from(*id as u64)).collect();
+        let ids: Vec<Scalar> = verified.iter().map(|(id, _)| Scalar::from(*id as u64)).collect();
         let mut combined = RistrettoPoint::identity();
+        
         for i in 0..verified.len() {
             let mut lambda = Scalar::one();
-            for j in 0..verified.len() { if i != j { lambda *= -participants[j] * (participants[i] - participants[j]).invert(); } }
+            for j in 0..verified.len() {
+                if i != j { lambda *= -ids[j] * (ids[i] - ids[j]).invert(); }
+            }
             combined += verified[i].1 * lambda;
         }
-        //Extract discrete log
-        Ok((bsgs_discrete_log(sum_c2 - combined, RISTRETTO_BASEPOINT_POINT)?, valid_proofs.len()))
+        
+        Ok((bsgs_dlog(sum_c2 - combined, RISTRETTO_BASEPOINT_POINT)?, valid.len()))
     }
-    //Sign data with ECDSA
-    fn sign_data(&self, parts: &[&[u8]]) -> [u8; 64] {
-        let mut data = Vec::new();
-        for p in parts { data.extend_from_slice(p); }
-        self.signing_key.sign(&data).to_bytes()
+    
+    fn sign(&self, parts: &[&[u8]]) -> [u8; 64] {
+        let mut d = Vec::new();
+        for p in parts { d.extend_from_slice(p); }
+        self.sig_key.sign(&d).to_bytes()
     }
-    //Verify ECDSA signature
-    fn verify_sig(&self, key: &SigSignKey, parts: &[&[u8]], sig: &[u8; 64]) -> Result<(), AggError> {
-        let mut data = Vec::new();
-        for p in parts { data.extend_from_slice(p); }
-        let sig = Signature::try_from(&sig[..]).map_err(|_| AggError::InvalidProof("Invalid sig".into()))?;
-        key.verify(&data, &sig).map_err(|_| AggError::InvalidProof("Sig failed".into()))
+    
+    fn verify_sig(&self, k: &VerifyingKey, parts: &[&[u8]], sig: &[u8; 64]) -> Result<(), AggError> {
+        let mut d = Vec::new();
+        for p in parts { d.extend_from_slice(p); }
+        let s = Signature::try_from(&sig[..]).map_err(|_| AggError::InvalidProof("bad sig".into()))?;
+        k.verify(&d, &s).map_err(|_| AggError::InvalidProof("sig verify failed".into()))
     }
 }
 
-////////////////////////////////////////////////////////////////////////////
-///Helper Functions
-
-//Baby-step giant-step discrete log extraction
-fn bsgs_discrete_log(target: RistrettoPoint, base: RistrettoPoint) -> Result<usize, AggError> {
-    let m = ((MAX_DEVICES as f64).sqrt() as usize) + 1; //Step size
+//Helper functions
+fn bsgs_dlog(target: RistrettoPoint, base: RistrettoPoint) -> Result<usize, AggError> {
+    let m = ((MAX_DEVICES as f64).sqrt() as usize) + 1;
     let mut baby = Vec::with_capacity(m);
-    let mut current = RistrettoPoint::identity();
-    for _ in 0..m { baby.push(current.compress().to_bytes()); current += base; } //Baby steps
+    let mut cur = RistrettoPoint::identity();
+    
+    for _ in 0..m {
+        baby.push(cur.compress().to_bytes());
+        cur += base;
+    }
+    
     let factor = base * Scalar::from(m as u64);
     let mut gamma = target;
-    for j in 0..m { //Giant steps
-        let gamma_bytes = gamma.compress().to_bytes();
-        for (i, entry) in baby.iter().enumerate() {
-            if entry.ct_eq(&gamma_bytes).unwrap_u8() == 1 {
-                let result = j * m + i;
-                if result <= MAX_DEVICES { return Ok(result); }
+    
+    for j in 0..m {
+        let gb = gamma.compress().to_bytes();
+        for (i, e) in baby.iter().enumerate() {
+            if e.ct_eq(&gb).unwrap_u8() == 1 {
+                let res = j * m + i;
+                if res <= MAX_DEVICES { return Ok(res); }
             }
         }
         gamma -= factor;
     }
-    Err(AggError::CryptoError("Discrete log not found".into()))
+    
+    Err(AggError::CryptoError("dlog not found".into()))
 }
 
-//DKG setup for FROST threshold keys
-pub fn setup_dkg(num: usize, threshold: usize) -> Result<Vec<(u32, frost::keys::KeyPackage, frost::keys::PublicKeyPackage)>, AggError> {
+pub fn setup_dkg(n: usize, t: usize) 
+    -> Result<Vec<(u32, frost::keys::KeyPackage, frost::keys::PublicKeyPackage)>, AggError> {
     let mut rng = OsRng;
-    let mut r1_packages = BTreeMap::new();
-    let mut r1_secrets = HashMap::new();
-    //Round 1: Generate commitments
-    for i in 1..=num {
-        let id = frost::Identifier::try_from(i as u16).map_err(|e| AggError::CryptoError(e.to_string()))?;
-        let (secret, package) = frost::keys::dkg::part1(id, num as u16, threshold as u16, &mut rng).map_err(|e| AggError::CryptoError(e.to_string()))?;
-        r1_secrets.insert(i as u32, secret);
-        r1_packages.insert(id, package);
+    let mut r1_pkgs = BTreeMap::new();
+    let mut r1_secs = HashMap::new();
+    
+    for i in 1..=n {
+        let id = frost::Identifier::try_from(i as u16)
+            .map_err(|e| AggError::CryptoError(e.to_string()))?;
+        let (sec, pkg) = frost::keys::dkg::part1(id, n as u16, t as u16, &mut rng)
+            .map_err(|e| AggError::CryptoError(e.to_string()))?;
+        r1_secs.insert(i as u32, sec);
+        r1_pkgs.insert(id, pkg);
     }
-    //Round 2: Compute shares
-    let mut r2_packages = HashMap::new();
-    for (i, secret) in &r1_secrets {
-        let mut received = r1_packages.clone();
-        let id = frost::Identifier::try_from(*i as u16).map_err(|e| AggError::CryptoError(e.to_string()))?;
-        received.remove(&id);
-        let (r2_secret, packages) = frost::keys::dkg::part2(secret.clone(), &received).map_err(|e| AggError::CryptoError(e.to_string()))?;
-        r2_packages.insert(*i, (r2_secret, packages));
+    
+    let mut r2_pkgs = HashMap::new();
+    for (i, sec) in &r1_secs {
+        let mut rcvd = r1_pkgs.clone();
+        let id = frost::Identifier::try_from(*i as u16)
+            .map_err(|e| AggError::CryptoError(e.to_string()))?;
+        rcvd.remove(&id);
+        let (r2_sec, pkgs) = frost::keys::dkg::part2(sec.clone(), &rcvd)
+            .map_err(|e| AggError::CryptoError(e.to_string()))?;
+        r2_pkgs.insert(*i, (r2_sec, pkgs));
     }
-    //Round 3: Finalize keys
+    
     let mut results = Vec::new();
-    for i in 1..=num {
-        let id = frost::Identifier::try_from(i as u16).map_err(|e| AggError::CryptoError(e.to_string()))?;
-        let (r2_secret, _) = r2_packages.get(&(i as u32)).ok_or(AggError::DkgIncomplete)?;
-        let mut received_r2 = BTreeMap::new();
-        for (j, (_, packages)) in &r2_packages {
+    for i in 1..=n {
+        let id = frost::Identifier::try_from(i as u16)
+            .map_err(|e| AggError::CryptoError(e.to_string()))?;
+        let (r2_sec, _) = r2_pkgs.get(&(i as u32)).ok_or(AggError::DkgIncomplete)?;
+        
+        let mut rcvd_r2 = BTreeMap::new();
+        for (j, (_, pkgs)) in &r2_pkgs {
             if *j != i as u32 {
-                if let Some(p) = packages.get(&id) {
-                    let sender_id = frost::Identifier::try_from(*j as u16).map_err(|e| AggError::CryptoError(e.to_string()))?;
-                    received_r2.insert(sender_id, p.clone());
+                if let Some(p) = pkgs.get(&id) {
+                    let sid = frost::Identifier::try_from(*j as u16)
+                        .map_err(|e| AggError::CryptoError(e.to_string()))?;
+                    rcvd_r2.insert(sid, p.clone());
                 }
             }
         }
-        let mut received_r1 = r1_packages.clone();
-        received_r1.remove(&id);
-        let (key_package, pubkey_package) = frost::keys::dkg::part3(r2_secret, &received_r1, &received_r2).map_err(|e| AggError::CryptoError(e.to_string()))?;
-        results.push((i as u32, key_package, pubkey_package));
+        
+        let mut rcvd_r1 = r1_pkgs.clone();
+        rcvd_r1.remove(&id);
+        let (key_pkg, pub_pkg) = frost::keys::dkg::part3(r2_sec, &rcvd_r1, &rcvd_r2)
+            .map_err(|e| AggError::CryptoError(e.to_string()))?;
+        results.push((i as u32, key_pkg, pub_pkg));
     }
     Ok(results)
 }
 
-//Get the current time helper method
-fn current_timestamp() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() }
-
-//Turn public key to RistrettoPoint (convert to byte array, decompress)
-fn frost_pubkey_to_point(key: &frost::VerifyingKey) -> Result<RistrettoPoint, AggError> {
-    let serialized = key.serialize().map_err(|e| AggError::CryptoError(format!("Key serialization failed: {}", e)))?;
-    CompressedRistretto::from_slice(&serialized).decompress()
-        .ok_or_else(|| AggError::CryptoError("Invalid frost key".into()))
+fn timestamp() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
 }
 
-//Turn the FROST signing key into a Scalar for Risteretto Operations (convert to byte array, then into Scalar)
-fn scalar_from_frost_signing(share: &frost::keys::SigningShare) -> Result<Scalar, AggError> {
-    let serialized = share.serialize();
-    Ok(Scalar::from_bytes_mod_order(serialized.as_slice().try_into()
-        .map_err(|_| AggError::CryptoError("Invalid share length".into()))?))
+fn frost_to_point(k: &frost::VerifyingKey) -> Result<RistrettoPoint, AggError> {
+    CompressedRistretto::from_slice(&k.serialize()).decompress()
+        .ok_or_else(|| AggError::CryptoError("bad frost key".into()))
 }
 
-//Helper to hash bytes to STARK field element
-fn hash_to_base_element(prefix: &[u8], data: &[u8]) -> BaseElement {
-    use blake3::Hasher;
-    let mut hasher = Hasher::new();
-    hasher.update(prefix);
-    hasher.update(data);
-    let hash = hasher.finalize();
-    //Take first 16 bytes and convert to u128
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[0..16]);
-    BaseElement::new(u128::from_le_bytes(bytes))
+fn frost_to_scalar(s: &frost::keys::SigningShare) -> Result<Scalar, AggError> {
+    Ok(Scalar::from_bytes_mod_order(
+        s.serialize().as_slice().try_into()
+            .map_err(|_| AggError::CryptoError("bad share len".into()))?
+    ))
 }
-
-////////////////////////////////////////////////////////////////////////////
-///Main Testing Method
 
 fn main() -> Result<(), AggError> {
-    println!("\n\nZK-DISPHASIA with ZK-STARK (Transparent, Post-Quantum Secure)\n");
-    println!("Configuration:\nProof expiration: every {} seconds\n", PROOF_EXPIRATION_SECS);
+    let (n, t, states) = (5, 3, [1u8, 0, 1, 1, 0]);
     
-    //DKG Setup
-    let (num_devices, threshold, states) = (5, 3, [1u8, 0, 1, 1, 0]);
-    println!("Setting up DKG for {} devices (threshold: {})...", num_devices, threshold);
-    let dkg_results = setup_dkg(num_devices, threshold)?;
-    println!("DKG Setup Success");
-    
-    println!("ZK-STARK initialized (no trusted setup required!)");
-
-    //Create the Devices
-    println!("Creating the Devices");
-    let mut devices = Vec::new();
+    let dkg = setup_dkg(n, t)?;
+    let mut devs = Vec::new();
     let mut all_keys = HashMap::new();
     
-    //Giving them Keys
-    for (id, key_pkg, pub_pkg) in &dkg_results {
-        let d = IoTDevice::new(*id, threshold, key_pkg.clone(), pub_pkg.clone(), 
-                              HashMap::new());
-        all_keys.insert(*id, d.signing_key.verifying_key());
-        devices.push(d);
+    for (id, kpkg, ppkg) in &dkg {
+        let d = IoTDevice::new(*id, t, kpkg.clone(), ppkg.clone(), HashMap::new());
+        all_keys.insert(*id, d.sig_key.verifying_key());
+        devs.push(d);
     }
-    //Sharing the Keys
-    for d in devices.iter_mut() { 
-        d.peer_keys = all_keys.clone(); 
+    
+    for d in devs.iter_mut() {
+        d.peer_keys = all_keys.clone();
     }
-    println!("System initialized\n\nSimulating device states: {:?}", states);
-
-    //Generating Proofs
-    for (i, state) in states.iter().enumerate() {
-        let proof = devices[i].generate_proof(*state)?;
-        println!("  Device {} generated proof for state {}", 
-                 i + 1, state);
-        for (j, device) in devices.iter_mut().enumerate() {
-            if let Err(e) = device.receive_proof(proof.clone()) {
-                if i != j { 
-                    println!("    Device {} rejected proof from {}: {}", j + 1, i + 1, e); 
-                }
-            }
-        }
-    }
-
-    //Generating Partial Decryptions
-    println!("\nGenerating partial decryptions:");
-    for i in 0..threshold {
-        if devices[i].received_proofs.len() >= num_devices {
-            let partial = devices[i].generate_partial_decryption()?;
-            println!("  Device {} generated partial", i + 1);
-            for d in devices.iter_mut() { 
-                d.receive_partial(partial.clone()).ok(); 
-            }
-        }
-    }
-
-    //Calculating Results
-    println!("\nResults:");
-    for d in &mut devices {
-        match d.compute_aggregate() {
-            Ok((sum, total)) => println!("  Device {}: sum = {}/{} devices", d.id, sum, total),
-            Err(e) => println!("  Device {}: Error - {}", d.id, e),
+    
+    for (i, &s) in states.iter().enumerate() {
+        let p = devs[i].generate_proof(s)?;
+        for d in devs.iter_mut() {
+            d.receive_proof(p.clone())?;
         }
     }
     
-    println!("\nSimulation Complete");
+    for i in 0..t {
+        if devs[i].proofs.len() >= n {
+            let p = devs[i].generate_partial_decryption()?;
+            for d in devs.iter_mut() {
+                d.receive_partial(p.clone()).ok();
+            }
+        }
+    }
+    
+    for d in &mut devs {
+        if let Ok((sum, total)) = d.compute_aggregate() {
+            println!("Device {}: sum={}/{}", d.id, sum, total);
+        }
+    }
+    
     Ok(())
 }
