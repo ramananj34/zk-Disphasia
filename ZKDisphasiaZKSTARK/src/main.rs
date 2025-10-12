@@ -120,12 +120,12 @@ impl BinaryProver {
         let cb = commit.as_int().to_le_bytes();
         
         trace.fill(|s| s[0] = BaseElement::ZERO,
-                   |step, s| {
-                       let byte_idx = (step / 8) % 16;
-                       let bit_idx = step % 8;
-                       let bit = (cb[byte_idx] >> bit_idx) & 1;
-                       s[0] = BaseElement::new(bit as u128);
-                   });
+        |step, s| {
+            let byte_idx = (step / 8) % 16;
+            let bit_idx = step % 8;
+            let bit = (cb[byte_idx] >> bit_idx) & 1;
+            s[0] = BaseElement::new(bit as u128);
+        });
         trace
     }
 }
@@ -199,15 +199,12 @@ pub struct ElGamalProof {
 }
 
 impl ElGamalProof {
-    fn prove(state: u8, r: &Scalar, c1: &RistrettoPoint, c2: &RistrettoPoint,
-             h: &RistrettoPoint, dev_id: u32, ts: u64) -> Self {
+    fn prove(state: u8, r: &Scalar, c1: &RistrettoPoint, c2: &RistrettoPoint, h: &RistrettoPoint, dev_id: u32, ts: u64) -> Self {
         let g = RISTRETTO_BASEPOINT_POINT;
         let w = Scalar::random(&mut OsRng);
         let v = Scalar::random(&mut OsRng);
-        
         let cr = g * w;
         let cs = g * v + h * w;
-        
         //Fiat-Shamir
         let mut t = Transcript::new(b"elgamal-correctness");
         t.append_u64(b"device", dev_id as u64);
@@ -216,23 +213,19 @@ impl ElGamalProof {
         t.append_message(b"c2", c2.compress().as_bytes());
         t.append_message(b"R", cr.compress().as_bytes());
         t.append_message(b"S", cs.compress().as_bytes());
-        
         let mut cb = [0u8; 64];
         t.challenge_bytes(b"challenge", &mut cb);
         let c = Scalar::from_bytes_mod_order_wide(&cb);
-        
         Self {
             commit_r: cr.compress().into(), commit_s: cs.compress().into(),
             resp_r: (w + c * r).into(), resp_state: (v + c * Scalar::from(state as u64)).into(),
         }
     }
     
-    fn verify(&self, c1: &RistrettoPoint, c2: &RistrettoPoint, h: &RistrettoPoint,
-              dev_id: u32, ts: u64) -> bool {
+    fn verify(&self, c1: &RistrettoPoint, c2: &RistrettoPoint, h: &RistrettoPoint, dev_id: u32, ts: u64) -> bool {
         let g = RISTRETTO_BASEPOINT_POINT;
         let (Some(cr), Some(cs)) = (self.commit_r.0.decompress(), self.commit_s.0.decompress())
         else { return false };
-        
         let mut t = Transcript::new(b"elgamal-correctness");
         t.append_u64(b"device", dev_id as u64);
         t.append_u64(b"timestamp", ts);
@@ -240,11 +233,9 @@ impl ElGamalProof {
         t.append_message(b"c2", c2.compress().as_bytes());
         t.append_message(b"R", self.commit_r.0.as_bytes());
         t.append_message(b"S", self.commit_s.0.as_bytes());
-        
         let mut cb = [0u8; 64];
         t.challenge_bytes(b"challenge", &mut cb);
         let c = Scalar::from_bytes_mod_order_wide(&cb);
-        
         let chk1 = g * self.resp_r.0 == cr + c1 * c;
         let chk2 = g * self.resp_state.0 + h * self.resp_r.0 == cs + c2 * c;
         chk1 && chk2
@@ -256,10 +247,8 @@ impl ElGamalProof {
         h.update(b"linked-commitment");
         h.update(&self.resp_state.0.to_bytes());
         h.update(&self.resp_r.0.to_bytes());
-        
         let hb = h.finalize();
         let b = hb.as_bytes();
-        
         let mut val: u128 = 0;
         for i in 0..16 { val |= (b[i] as u128) << (i * 8); }
         BaseElement::new(val)
@@ -288,23 +277,20 @@ pub struct SchnorrProof {
 }
 
 impl SchnorrProof {
-    fn prove_dlog(secret: &Scalar, sum_c1: &RistrettoPoint, partial: &RistrettoPoint,
-                  ts: u64, id: u32) -> Self {
+    fn prove_dlog(secret: &Scalar, sum_c1: &RistrettoPoint, partial: &RistrettoPoint, ts: u64, id: u32) -> Self {
         let r = Scalar::random(&mut OsRng);
         let c = sum_c1 * r;
         let ch = Self::challenge(sum_c1, partial, &c, ts, id);
         Self { commitment: c.compress().into(), response: (r + ch * secret).into() }
     }
     
-    fn verify_dlog(&self, sum_c1: &RistrettoPoint, partial: &RistrettoPoint,
-                   ts: u64, id: u32) -> bool {
+    fn verify_dlog(&self, sum_c1: &RistrettoPoint, partial: &RistrettoPoint, ts: u64, id: u32) -> bool {
         let Some(c) = self.commitment.0.decompress() else { return false };
         let ch = Self::challenge(sum_c1, partial, &c, ts, id);
         sum_c1 * self.response.0 == c + partial * ch
     }
     
-    fn challenge(sum_c1: &RistrettoPoint, partial: &RistrettoPoint,
-                 commit: &RistrettoPoint, ts: u64, id: u32) -> Scalar {
+    fn challenge(sum_c1: &RistrettoPoint, partial: &RistrettoPoint, commit: &RistrettoPoint, ts: u64, id: u32) -> Scalar {
         let mut t = Transcript::new(b"schnorr-dlog-equality");
         t.append_u64(b"timestamp", ts);
         t.append_u64(b"device", id as u64);
@@ -346,8 +332,7 @@ pub struct IoTDevice {
 }
 
 impl IoTDevice {
-    pub fn new(id: u32, threshold: usize, frost_key: frost::keys::KeyPackage,
-               group_pub: frost::keys::PublicKeyPackage, peer_keys: HashMap<u32, VerifyingKey>) -> Self {
+    pub fn new(id: u32, threshold: usize, frost_key: frost::keys::KeyPackage, group_pub: frost::keys::PublicKeyPackage, peer_keys: HashMap<u32, VerifyingKey>) -> Self {
         Self {
             id, threshold, frost_key, group_pub, peer_keys,
             sig_key: SigningKey::generate(&mut OsRng),
@@ -360,43 +345,34 @@ impl IoTDevice {
     
     pub fn generate_proof(&self, state: u8) -> Result<DeviceProof, AggError> {
         if state > 1 { return Err(AggError::CryptoError("State must be 0/1".into())); }
-        
         let ts = timestamp();
         let mut r = Scalar::random(&mut OsRng);
         let g = RISTRETTO_BASEPOINT_POINT;
         let h = frost_to_point(&self.group_pub.verifying_key())?;
-        
         //ElGamal encrypt
         let (c1, c2) = (g * r, g * Scalar::from(state as u64) + h * r);
-        
         //Schnorr proof for ElGamal
         let eg_proof = ElGamalProof::prove(state, &r, &c1, &c2, &h, self.id, ts);
-        
         //Get commitment linking Schnorr to STARK
         let commit = eg_proof.get_commitment();
-        
         //Build STARK trace and generate proof
         let trace = self.stark_prover.build_trace(commit);
         let stark_proof = self.stark_prover.prove(trace)
             .map_err(|e| { r.zeroize(); AggError::CryptoError(format!("STARK failed: {:?}", e)) })?;
-        
         let mut bytes = Vec::new();
         stark_proof.write_into(&mut bytes);
         r.zeroize();
-        
         Ok(DeviceProof {
             device_id: self.id, timestamp: ts,
             elgamal_c1: c1.compress().into(), elgamal_c2: c2.compress().into(),
             elgamal_proof: eg_proof, stark_proof: bytes,
-            signature: self.sign(&[&ts.to_le_bytes(), &self.id.to_le_bytes(),
-                                   c1.compress().as_bytes(), c2.compress().as_bytes()]),
+            signature: self.sign(&[&ts.to_le_bytes(), &self.id.to_le_bytes(), c1.compress().as_bytes(), c2.compress().as_bytes()]),
         })
     }
     
     pub fn receive_proof(&mut self, p: DeviceProof) -> Result<(), AggError> {
         self.check_rate(p.device_id)?;
         let now = timestamp();
-        
         if p.timestamp + PROOF_EXPIRY < now { return Err(AggError::ExpiredProof); }
         if self.proofs.get(&p.device_id).map_or(false, |e| e.timestamp + PROOF_EXPIRY > now) {
             return Err(AggError::InvalidProof("Duplicate".into()));
@@ -404,19 +380,14 @@ impl IoTDevice {
         if p.stark_proof.len() > MAX_PROOF_SIZE {
             return Err(AggError::InvalidProof("Too big".into()));
         }
-        
         //Verify signature
         let pk = self.peer_keys.get(&p.device_id)
             .ok_or(AggError::InvalidProof("Unknown device".into()))?;
-        self.verify_sig(pk, &[&p.timestamp.to_le_bytes(), &p.device_id.to_le_bytes(),
-                              p.elgamal_c1.0.as_bytes(), p.elgamal_c2.0.as_bytes()],
-                       &p.signature)?;
-        
+        self.verify_sig(pk, &[&p.timestamp.to_le_bytes(), &p.device_id.to_le_bytes(), p.elgamal_c1.0.as_bytes(), p.elgamal_c2.0.as_bytes()], &p.signature)?;
         //Verify ElGamal proof
         let c1 = p.elgamal_c1.0.decompress().ok_or(AggError::InvalidProof("bad c1".into()))?;
         let c2 = p.elgamal_c2.0.decompress().ok_or(AggError::InvalidProof("bad c2".into()))?;
         let h = frost_to_point(&self.group_pub.verifying_key())?;
-        
         if !p.elgamal_proof.verify(&c1, &c2, &h, p.device_id, p.timestamp) {
             return Err(AggError::InvalidProof("ElGamal proof failed".into()));
         }
@@ -425,12 +396,9 @@ impl IoTDevice {
         let commit = p.elgamal_proof.get_commitment();
         let stark_proof = Proof::from_bytes(&p.stark_proof[..])
             .map_err(|_| AggError::InvalidProof("bad STARK format".into()))?;
-        
         let pub_inputs = BinaryPublicInputs { ciphertext_commitment: commit };
         let min_opts = AcceptableOptions::MinConjecturedSecurity(95);
-        
-        verify::<BinaryAir, Blake3_256<BaseElement>, DefaultRandomCoin<Blake3_256<BaseElement>>, 
-                MerkleTree<Blake3_256<BaseElement>>>(stark_proof, pub_inputs, &min_opts)
+        verify::<BinaryAir, Blake3_256<BaseElement>, DefaultRandomCoin<Blake3_256<BaseElement>>, MerkleTree<Blake3_256<BaseElement>>>(stark_proof, pub_inputs, &min_opts)
             .map_err(|_| AggError::InvalidProof("STARK verify failed".into()))?;
         
         self.proofs.insert(p.device_id, p);
@@ -479,7 +447,6 @@ impl IoTDevice {
         self.recompute();
         let sum_c1 = self.agg_c1.ok_or(AggError::CryptoError("No agg".into()))?;
         let ts = timestamp();
-        
         let mut sec = frost_to_scalar(&self.frost_key.signing_share())?;
         let partial = sum_c1 * sec;
         let proof = SchnorrProof::prove_dlog(&sec, &sum_c1, &partial, ts, self.id);
@@ -488,20 +455,16 @@ impl IoTDevice {
         Ok(PartialDecryption {
             device_id: self.id, timestamp: ts,
             partial: partial.compress().into(), proof,
-            signature: self.sign(&[&ts.to_le_bytes(), &self.id.to_le_bytes(),
-                                   partial.compress().as_bytes()]),
+            signature: self.sign(&[&ts.to_le_bytes(), &self.id.to_le_bytes(), partial.compress().as_bytes()]),
         })
     }
     
     pub fn receive_partial(&mut self, p: PartialDecryption) -> Result<(), AggError> {
         self.check_rate(p.device_id)?;
         if p.timestamp + PROOF_EXPIRY < timestamp() { return Err(AggError::ExpiredProof); }
-        
         let pk = self.peer_keys.get(&p.device_id)
             .ok_or(AggError::InvalidProof("Unknown".into()))?;
-        self.verify_sig(pk, &[&p.timestamp.to_le_bytes(), &p.device_id.to_le_bytes(),
-                              p.partial.0.as_bytes()], &p.signature)?;
-        
+        self.verify_sig(pk, &[&p.timestamp.to_le_bytes(), &p.device_id.to_le_bytes(), p.partial.0.as_bytes()], &p.signature)?;
         self.partials.insert(p.device_id, p);
         Ok(())
     }
@@ -510,15 +473,11 @@ impl IoTDevice {
         self.recompute();
         let cutoff = timestamp().saturating_sub(PROOF_EXPIRY);
         let valid: Vec<_> = self.proofs.values().filter(|p| p.timestamp > cutoff).collect();
-        
         if valid.is_empty() { return Ok((0, 0)); }
-        
         let valid_parts: Vec<_> = self.partials.values().filter(|p| p.timestamp > cutoff).collect();
         if valid_parts.len() < self.threshold { return Err(AggError::ThresholdNotMet); }
-        
         let sum_c1 = self.agg_c1.ok_or(AggError::CryptoError("No agg".into()))?;
         let sum_c2 = self.agg_c2.ok_or(AggError::CryptoError("No agg".into()))?;
-        
         //Verify partials
         let mut verified = Vec::new();
         for p in valid_parts.iter().take(self.threshold) {
@@ -528,11 +487,9 @@ impl IoTDevice {
             }
             verified.push((p.device_id, pt));
         }
-        
         //Lagrange interpolation
         let ids: Vec<Scalar> = verified.iter().map(|(id, _)| Scalar::from(*id as u64)).collect();
         let mut combined = RistrettoPoint::identity();
-        
         for i in 0..verified.len() {
             let mut lambda = Scalar::one();
             for j in 0..verified.len() {
@@ -540,7 +497,6 @@ impl IoTDevice {
             }
             combined += verified[i].1 * lambda;
         }
-        
         Ok((bsgs_dlog(sum_c2 - combined, RISTRETTO_BASEPOINT_POINT)?, valid.len()))
     }
     
@@ -563,15 +519,12 @@ fn bsgs_dlog(target: RistrettoPoint, base: RistrettoPoint) -> Result<usize, AggE
     let m = ((MAX_DEVICES as f64).sqrt() as usize) + 1;
     let mut baby = Vec::with_capacity(m);
     let mut cur = RistrettoPoint::identity();
-    
     for _ in 0..m {
         baby.push(cur.compress().to_bytes());
         cur += base;
     }
-    
     let factor = base * Scalar::from(m as u64);
     let mut gamma = target;
-    
     for j in 0..m {
         let gb = gamma.compress().to_bytes();
         for (i, e) in baby.iter().enumerate() {
@@ -582,7 +535,6 @@ fn bsgs_dlog(target: RistrettoPoint, base: RistrettoPoint) -> Result<usize, AggE
         }
         gamma -= factor;
     }
-    
     Err(AggError::CryptoError("dlog not found".into()))
 }
 
