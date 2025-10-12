@@ -194,63 +194,83 @@ serde_wrapper!(SerScalar, Scalar, 32, Scalar::from_bytes_mod_order);
 pub struct ElGamalProof {
     pub commit_r: SerCompressed,
     pub commit_s: SerCompressed,
+    pub commit_p: SerCompressed,
     pub resp_r: SerScalar,
     pub resp_state: SerScalar,
+    pub pedersen_commit: SerCompressed,
 }
 
 impl ElGamalProof {
     fn prove(state: u8, r: &Scalar, c1: &RistrettoPoint, c2: &RistrettoPoint, h: &RistrettoPoint, dev_id: u32, ts: u64) -> Self {
         let g = RISTRETTO_BASEPOINT_POINT;
+        //Create Pedersen commitment with SAME r as ElGamal
+        let state_scalar = Scalar::from(state as u64);
+        let pedersen_commit = g * state_scalar + h * r;
         let w = Scalar::random(&mut OsRng);
         let v = Scalar::random(&mut OsRng);
-        let cr = g * w;
-        let cs = g * v + h * w;
+        //Commitments for the three proofs
+        let cr = g * w; //for c1 proof
+        let cs = g * v + h * w; //for c2 proof
+        let cp = g * v + h * w; //for Pedersen proof
         //Fiat-Shamir
-        let mut t = Transcript::new(b"elgamal-correctness");
+        let mut t = Transcript::new(b"elgamal-pedersen");
         t.append_u64(b"device", dev_id as u64);
         t.append_u64(b"timestamp", ts);
         t.append_message(b"c1", c1.compress().as_bytes());
         t.append_message(b"c2", c2.compress().as_bytes());
+        t.append_message(b"pedersen", pedersen_commit.compress().as_bytes());
         t.append_message(b"R", cr.compress().as_bytes());
         t.append_message(b"S", cs.compress().as_bytes());
+        t.append_message(b"P", cp.compress().as_bytes());
         let mut cb = [0u8; 64];
         t.challenge_bytes(b"challenge", &mut cb);
         let c = Scalar::from_bytes_mod_order_wide(&cb);
         Self {
-            commit_r: cr.compress().into(), commit_s: cs.compress().into(),
-            resp_r: (w + c * r).into(), resp_state: (v + c * Scalar::from(state as u64)).into(),
+            commit_r: cr.compress().into(),
+            commit_s: cs.compress().into(),
+            commit_p: cp.compress().into(),
+            resp_r: (w + c * r).into(),
+            resp_state: (v + c * state_scalar).into(),
+            pedersen_commit: pedersen_commit.compress().into(),
         }
     }
     
     fn verify(&self, c1: &RistrettoPoint, c2: &RistrettoPoint, h: &RistrettoPoint, dev_id: u32, ts: u64) -> bool {
         let g = RISTRETTO_BASEPOINT_POINT;
-        let (Some(cr), Some(cs)) = (self.commit_r.0.decompress(), self.commit_s.0.decompress())
-        else { return false };
-        let mut t = Transcript::new(b"elgamal-correctness");
+        let (Some(cr), Some(cs), Some(cp), Some(pc)) = (
+            self.commit_r.0.decompress(), 
+            self.commit_s.0.decompress(),
+            self.commit_p.0.decompress(),
+            self.pedersen_commit.0.decompress()
+        ) else { return false };
+        let mut t = Transcript::new(b"elgamal-pedersen");
         t.append_u64(b"device", dev_id as u64);
         t.append_u64(b"timestamp", ts);
         t.append_message(b"c1", c1.compress().as_bytes());
         t.append_message(b"c2", c2.compress().as_bytes());
+        t.append_message(b"pedersen", self.pedersen_commit.0.as_bytes());
         t.append_message(b"R", self.commit_r.0.as_bytes());
         t.append_message(b"S", self.commit_s.0.as_bytes());
+        t.append_message(b"P", self.commit_p.0.as_bytes());
         let mut cb = [0u8; 64];
         t.challenge_bytes(b"challenge", &mut cb);
         let c = Scalar::from_bytes_mod_order_wide(&cb);
+        //Check all three equations
         let chk1 = g * self.resp_r.0 == cr + c1 * c;
         let chk2 = g * self.resp_state.0 + h * self.resp_r.0 == cs + c2 * c;
-        chk1 && chk2
+        let chk3 = g * self.resp_state.0 + h * self.resp_r.0 == cp + pc * c;
+        chk1 && chk2 && chk3
     }
 
-    //Create commitment to link Schnorr proof to STARK proof
     fn get_commitment(&self) -> BaseElement {
-        let mut h = blake2b_simd::Params::new().hash_length(16).to_state();
-        h.update(b"linked-commitment");
-        h.update(&self.resp_state.0.to_bytes());
-        h.update(&self.resp_r.0.to_bytes());
-        let hb = h.finalize();
-        let b = hb.as_bytes();
+        //Use the Pedersen commitment point to generate deterministic value for STARK
+        let cb = self.pedersen_commit.0.as_bytes();
         let mut val: u128 = 0;
-        for i in 0..16 { val |= (b[i] as u128) << (i * 8); }
+        for i in 0..16 {
+            if i < 32 {
+                val |= (cb[i % 32] as u128) << ((i % 16) * 8);
+            }
+        }
         BaseElement::new(val)
     }
 }
