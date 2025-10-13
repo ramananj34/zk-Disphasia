@@ -1,9 +1,9 @@
 [package]
-name = "ZK-DISPHASIA_ElGamal_ZKSNARK"
-version = "0.1.0"
+name = "ZK-DISPHASIA_ZKSNARK"
+version = "0.0.0"
 authors = ["Jude Ramanan"]
 edition = "2024"
-description = "Zero Knowledge Distributed IoT Secure Protocol for Homomorphic Aggregation Schemes, Infrastructure, and Algorithms (Version using ZK-SNARK and ElGamal)"
+description = "Zero Knowledge Decentralized IoT Secure Protocol for Homomorphic Aggregation Schemes, Infrastructure, and Algorithms (Version using ZK-SNARK)"
 repository = "https://github.com/ramananj34/ZK-Disphasia"
 
 [dependencies]
@@ -19,11 +19,12 @@ rand = "0.8" #Random support
 rand_core = "0.6" #Random support
 serde = { version = "1.0", features = ["derive"] } #Serialization/deserialization
 serde_with = "3.14" #Serialization/deserialization
+halo2_gadgets = "0.3"
 
+#Two programs
 [[bin]]
 name = "setup_ceremony"
 path = "src/bin/setup.rs"
-
 [[bin]]
 name = "iot_device"
 path = "src/bin/main.rs"

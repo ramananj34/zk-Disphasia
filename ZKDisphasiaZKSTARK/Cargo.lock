@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ZK-DISPHASIA_ZKSTARK"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "blake2b_simd",
  "curve25519-dalek-ng",

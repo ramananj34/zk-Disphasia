@@ -1,9 +1,9 @@
 [package]
 name = "ZK-DISPHASIA_Bulletproof"
-version = "0.1.0"
+version = "0.0.0"
 authors = ["Jude Ramanan"]
 edition = "2024"
-description = "Zero Knowledge Distributed IoT Secure Protocol for Homomorphic Aggregation Schemes, Infrastructure, and Algorithms (Version using Bulletproofs)"
+description = "Zero Knowledge Decentralized IoT Secure Protocol for Homomorphic Aggregation Schemes, Infrastructure, and Algorithms (Version using Bulletproofs)"
 repository = "https://github.com/ramananj34/ZK-Disphasia"
 
 [dependencies]
@@ -14,7 +14,7 @@ merlin = "3.0" #Transcripts
 frost-ristretto255 = "1.0" #FROST
 rand = "0.8" #Random support
 rand_core = "0.6" #Random support
-subtle = "2.4" #Constant time operations
 zeroize = "1.5" #Data deletion
+subtle = "2.5" #Constant time operations
 serde = { version = "1.0", features = ["derive"] } #Serialization/deserialization
 serde_with = "3.14" #Serialization/deserialization
