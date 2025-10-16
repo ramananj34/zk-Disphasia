@@ -159,37 +159,44 @@ pub struct DeviceProof {
     pub signature: [u8; 64], //ed25519 signature for authenticity
 }
 
-//Schnorr proof for partial decryption - proves you know your secret key
+//Schnorr proof for partial decryption
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchnorrProof {
-    pub commitment: SerCompressed,
+    pub commitment_g: SerCompressed,
+    pub commitment_c: SerCompressed,
     pub response: SerScalar,
 }
 impl SchnorrProof {
     //Prove: partial = sum_c1 * secret  (discrete log equality)
-    fn prove_dlog(secret: &Scalar, sum_c1: &RistrettoPoint, partial: &RistrettoPoint, ts: u64, id: u32) -> Self {
-        let mut r = Scalar::random(&mut OsRng);//Get nonce
-        let commit = sum_c1 * r; //Compute commitment
-        let c = Self::challenge(sum_c1, partial, &commit, ts, id); //Fiat-Shamir challenge
-        let result = Self { commitment: commit.compress().into(), response: (r + c * secret).into() }; //Compute response
-        r.zeroize(); //Get rid of nonce
+    fn prove_dlog(secret: &Scalar, sum_c1: &RistrettoPoint, partial: &RistrettoPoint, public_key_share: &RistrettoPoint, ts: u64, id: u32) -> Self {
+        let g = RISTRETTO_BASEPOINT_POINT;
+        let mut r = Scalar::random(&mut OsRng);
+        let commit_g = g * r;
+        let commit_c = sum_c1 * r;
+        let c = Self::challenge(sum_c1, partial, public_key_share, &commit_g, &commit_c, ts, id);
+        let result = Self { commitment_g: commit_g.compress().into(),commitment_c: commit_c.compress().into(),response: (r + c * secret).into() };
+        r.zeroize();
         result
     }
-    fn verify_dlog(&self, sum_c1: &RistrettoPoint, partial: &RistrettoPoint, ts: u64, id: u32) -> bool {
-        let Some(commit) = self.commitment.0.decompress() else { return false }; //Decompress statement
-        let c = Self::challenge(sum_c1, partial, &commit, ts, id); //Rebuild challenge
-        sum_c1 * self.response.0 == commit + partial * c //Check schnorr equality
+    fn verify_dlog(&self, sum_c1: &RistrettoPoint, partial: &RistrettoPoint, public_key_share: &RistrettoPoint, ts: u64, id: u32) -> bool {
+        let g = RISTRETTO_BASEPOINT_POINT;
+        let Some(commit_g) = self.commitment_g.0.decompress() else { return false };
+        let Some(commit_c) = self.commitment_c.0.decompress() else { return false };
+        let c = Self::challenge(sum_c1, partial, public_key_share, &commit_g, &commit_c, ts, id);
+        let check1 = g * self.response.0 == commit_g + public_key_share * c;
+        let check2 = sum_c1 * self.response.0 == commit_c + partial * c;
+        check1 && check2
     }
-    fn challenge(sum_c1: &RistrettoPoint, partial: &RistrettoPoint, commit: &RistrettoPoint, ts: u64, id: u32) -> Scalar {
-        //Build transcript
+    fn challenge(sum_c1: &RistrettoPoint, partial: &RistrettoPoint, public_key_share: &RistrettoPoint, commit_g: &RistrettoPoint, commit_c: &RistrettoPoint, ts: u64, id: u32) -> Scalar {
         let mut t = Transcript::new(b"schnorr-dlog-equality");
         t.append_message(b"protocol_version", &[PROTOCOL_VERSION]);
         t.append_u64(b"timestamp", ts);
         t.append_u64(b"device", id as u64);
         t.append_message(b"sum_c1", sum_c1.compress().as_bytes());
         t.append_message(b"partial", partial.compress().as_bytes());
-        t.append_message(b"commitment", commit.compress().as_bytes());
-        //Generate challenge
+        t.append_message(b"public_key_share", public_key_share.compress().as_bytes());
+        t.append_message(b"commitment_g", commit_g.compress().as_bytes());
+        t.append_message(b"commitment_c", commit_c.compress().as_bytes());
         let mut b = [0u8; 64];
         t.challenge_bytes(b"challenge", &mut b);
         Scalar::from_bytes_mod_order_wide(&b)
@@ -370,7 +377,10 @@ impl IoTDevice {
         let ts = timestamp(); //Get timestamp
         let mut sec = frost_to_scalar(&self.frost_key.signing_share())?; //Convert secret key to scalar
         let partial = sum_c1 * sec;  //partial decryption
-        let proof = SchnorrProof::prove_dlog(&sec, &sum_c1, &partial, ts, self.id); //Generate proof
+        let frost_id = frost::Identifier::try_from(self.id as u16).map_err(|e| AggError::CryptoError(e.to_string()))?;
+        let public_key_share = self.group_pub.verifying_shares().get(&frost_id).ok_or(AggError::CryptoError("Unknown participant".into()))?;
+        let public_key_share_point = frost_share_to_point(public_key_share)?;
+        let proof = SchnorrProof::prove_dlog(&sec, &sum_c1, &partial, &public_key_share_point, ts, self.id);
         sec.zeroize();
         //Return partial decryption
         Ok(PartialDecryption {
@@ -399,7 +409,10 @@ impl IoTDevice {
         //Verify Schnorr
         let sum_c1 = self.agg_c1.ok_or(AggError::CryptoError("No aggregation computed yet".into()))?;
         let pt = p.partial.0.decompress().ok_or(AggError::CryptoError("Invalid partial point".into()))?;
-        if !p.proof.verify_dlog(&sum_c1, &pt, p.timestamp, p.device_id) { return Err(AggError::InvalidProof("Schnorr proof verification failed".into())); }
+        let frost_id = frost::Identifier::try_from(p.device_id as u16).map_err(|e| AggError::CryptoError(e.to_string()))?;
+        let public_key_share = self.group_pub.verifying_shares().get(&frost_id).ok_or(AggError::CryptoError("Unknown participant".into()))?;
+        let public_key_share_point = frost_share_to_point(public_key_share)?;
+        if !p.proof.verify_dlog(&sum_c1, &pt, &public_key_share_point, p.timestamp, p.device_id) { return Err(AggError::InvalidProof("Schnorr proof verification failed".into())); }
         self.partials.insert(p.device_id, p); //Add to aggregate
         Ok(())
     }
@@ -437,7 +450,10 @@ impl IoTDevice {
         let mut verified = Vec::new();
         for p in self.partials.values().take(self.threshold) {
             let pt = p.partial.0.decompress().ok_or(AggError::CryptoError("bad partial".into()))?;
-            if !p.proof.verify_dlog(&sum_c1, &pt, p.timestamp, p.device_id) { return Err(AggError::InvalidProof(format!("Failed for {}", p.device_id))); }
+            let frost_id = frost::Identifier::try_from(p.device_id as u16).map_err(|e| AggError::CryptoError(e.to_string()))?;
+            let public_key_share = self.group_pub.verifying_shares().get(&frost_id).ok_or(AggError::CryptoError("Unknown participant".into()))?;
+            let public_key_share_point = frost_share_to_point(public_key_share)?;
+            if !p.proof.verify_dlog(&sum_c1, &pt, &public_key_share_point, p.timestamp, p.device_id) { return Err(AggError::InvalidProof(format!("Failed for {}", p.device_id))); }
             verified.push((p.device_id, pt));
         }
         //Check valid DKG participants
@@ -605,6 +621,9 @@ fn timestamp() -> u64 {
 }
 fn frost_to_point(k: &frost::VerifyingKey) -> Result<RistrettoPoint, AggError> {
     CompressedRistretto::from_slice(&k.serialize()).decompress().ok_or_else(|| AggError::CryptoError("bad frost key".into()))
+}
+fn frost_share_to_point(s: &frost::keys::VerifyingShare) -> Result<RistrettoPoint, AggError> {
+    CompressedRistretto::from_slice(&s.serialize()).decompress().ok_or_else(|| AggError::CryptoError("bad frost share".into()))
 }
 fn frost_to_scalar(s: &frost::keys::SigningShare) -> Result<Scalar, AggError> {
     Ok(Scalar::from_bytes_mod_order(s.serialize().as_slice().try_into().map_err(|_| AggError::CryptoError("bad share len".into()))?))
