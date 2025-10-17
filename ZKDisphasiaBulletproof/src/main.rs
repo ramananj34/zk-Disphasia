@@ -58,6 +58,13 @@ macro_rules! serde_wrapper {
 serde_wrapper!(SerCompressed, CompressedRistretto, 32, CompressedRistretto);
 serde_wrapper!(SerScalar, Scalar, 32, Scalar::from_bytes_mod_order);
 
+#[derive(Debug, Clone)]
+struct VerifiedCiphertext {
+    timestamp: u64,
+    c1: RistrettoPoint,
+    c2: RistrettoPoint,
+}
+
 //ElGamal correctness proof
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElGamalProof {
@@ -223,7 +230,7 @@ pub struct IoTDevice {
     sig_key: SigningKey, //for message authentication
     peer_keys: HashMap<u32, VerifyingKey>, //peer public keys
     valid_participant_ids: HashSet<u32>, //Valid peers
-    proofs: HashMap<u32, DeviceProof>, //received proofs from peers
+    verified_ciphertexts: HashMap<u32, VerifiedCiphertext>, //received proofs from peers
     partials: HashMap<u32, PartialDecryption>,  //received partial decryptions
     agg_c1: Option<RistrettoPoint>, //aggregated ciphertext c1
     agg_c2: Option<RistrettoPoint>, //aggregated ciphertext c2
@@ -251,7 +258,7 @@ impl IoTDevice {
         Ok(Self {
             id, threshold, frost_key, group_pub, peer_keys,
             sig_key: SigningKey::generate(&mut OsRng), valid_participant_ids,
-            proofs: HashMap::new(), partials: HashMap::new(),
+            verified_ciphertexts: HashMap::new(), partials: HashMap::new(),
             agg_c1: None, agg_c2: None,
             bp_gens: BulletproofGens::new(8, 1),
             ped_gens: PedersenGens::default(),
@@ -312,9 +319,9 @@ impl IoTDevice {
     //Receive and verify a proof from a peer
     pub fn receive_proof(&mut self, p: DeviceProof) -> Result<(), AggError> {
         //Start with basic checks
-        if self.proofs.len() >= MAX_STORED_PROOFS {
+        if self.verified_ciphertexts.len() >= MAX_STORED_PROOFS {
             self.cleanup();
-            if self.proofs.len() >= MAX_STORED_PROOFS { return Err(AggError::RateLimited); }
+            if self.verified_ciphertexts.len() >= MAX_STORED_PROOFS { return Err(AggError::RateLimited); }
         }
         self.check_rate(p.device_id)?;
         let now = timestamp();
@@ -324,7 +331,7 @@ impl IoTDevice {
         let device_nonces = self.seen_nonces.entry(p.device_id).or_insert_with(HashSet::new);
         if device_nonces.len() >= MAX_NONCES_PER_DEVICE { return Err(AggError::RateLimited); }
         if !device_nonces.insert(p.nonce) { return Err(AggError::InvalidProof("Nonce already used".into())); }
-        if self.proofs.contains_key(&p.device_id) { return Err(AggError::InvalidProof("Duplicate".into())); }
+        if self.verified_ciphertexts.contains_key(&p.device_id) { return Err(AggError::InvalidProof("Duplicate".into())); }
         if p.bulletproof.len() > MAX_PROOF_SIZE { return Err(AggError::InvalidProof("Too big".into())); }
         //Verify signature
         let pk = self.peer_keys.get(&p.device_id).ok_or(AggError::InvalidProof("Unknown device".into()))?;
@@ -365,7 +372,7 @@ impl IoTDevice {
         //Verify bulletproof
         RangeProof::from_bytes(&p.bulletproof).map_err(|_| AggError::InvalidProof("bad BP".into()))?.verify_single(&self.bp_gens, &self.ped_gens, &mut t, &expected_commit.compress(), 8).map_err(|_| AggError::InvalidProof("BP verify failed".into()))?;
         //Insert proof and maybe recompute aggregate
-        self.proofs.insert(p.device_id, p);
+        self.verified_ciphertexts.insert(p.device_id, VerifiedCiphertext {timestamp: p.timestamp,c1,c2,});
         self.maybe_recompute();
         Ok(())
     }
@@ -429,8 +436,8 @@ impl IoTDevice {
     //Clean up old proofs and partials
     pub fn cleanup(&mut self) {
         let cutoff = timestamp().saturating_sub(PROOF_EXPIRY);
-        let expired_devices: HashSet<u32> = self.proofs.iter().filter(|(_, p)| p.timestamp <= cutoff).map(|(id, _)| *id).collect();
-        self.proofs.retain(|_, p| p.timestamp > cutoff);
+        let expired_devices: HashSet<u32> = self.verified_ciphertexts.iter().filter(|(_, vc)| vc.timestamp <= cutoff).map(|(id, _)| *id).collect();
+        self.verified_ciphertexts.retain(|_, vc| vc.timestamp > cutoff);
         self.partials.retain(|_, p| p.timestamp > cutoff);
         for device_id in expired_devices { self.seen_nonces.remove(&device_id); }
         self.maybe_recompute();
@@ -440,7 +447,7 @@ impl IoTDevice {
     pub fn compute_aggregate(&mut self) -> Result<(usize, usize), AggError> {
         self.recompute();
         //Make sure threshold is met and we are up to date
-        let valid = self.proofs.len();
+        let valid = self.verified_ciphertexts.len();
         if valid == 0 { return Ok((0, 0)); }
         if self.partials.len() < self.threshold { return Err(AggError::ThresholdNotMet); }
         //Start sums
@@ -486,13 +493,12 @@ impl IoTDevice {
     
     //Recompute aggregate ciphertexts
     fn recompute(&mut self) {
-        if self.proofs.is_empty() { self.agg_c1 = None; self.agg_c2 = None;
+        if self.verified_ciphertexts.is_empty() { self.agg_c1 = None; self.agg_c2 = None;
         } else {
             let (mut c1, mut c2) = (RistrettoPoint::identity(), RistrettoPoint::identity());
-            for p in self.proofs.values() {
-                if let (Some(p1), Some(p2)) = (p.elgamal_c1.0.decompress(), p.elgamal_c2.0.decompress()) {
-                    c1 += p1; c2 += p2;
-                }
+            for vc in self.verified_ciphertexts.values() {
+                c1+=vc.c1;
+                c2+=vc.c2;
             }
             self.agg_c1 = Some(c1);
             self.agg_c2 = Some(c2);
@@ -657,7 +663,7 @@ fn main() -> Result<(), AggError> {
     }
     //Generate partial decryptions
     for i in 0..t {
-        if devs[i].proofs.len() >= n {
+        if devs[i].verified_ciphertexts.len() >= n {
             let p = devs[i].generate_partial_decryption()?;
             for d in devs.iter_mut() {
                 d.receive_partial(p.clone()).ok();
