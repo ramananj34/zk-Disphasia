@@ -17,8 +17,7 @@ use std::error::Error; //Errors
 
 //Config constants
 const PROOF_EXPIRY: u64 = 300; //proofs expire after 5 mins
-const RECOMPUTE_INTERVAL: u64 = 30; //reaggregate every 30s
-const MAX_DEVICES: usize = 10000; //max devices for discrete log
+const MAX_DEVICES: usize = 1000; //max devices for discrete log
 const RATE_WINDOW: u64 = 10; //rate limit window
 const MAX_MSGS_PER_WINDOW: u32 = 10; //max msgs per window
 const MAX_TOTAL_RATE: u32 = 50; //global max messages
@@ -238,7 +237,6 @@ pub struct IoTDevice {
     ped_gens: PedersenGens, //pedersen commitment generators
     threshold: usize, //How many devices to decrypt
     rates: HashMap<u32, (u64, u32)>, //rate limiting per peer
-    last_recomp: u64, //last recomputation time
     seen_nonces: HashMap<u32, std::collections::HashSet<[u8; 32]>> //Replay protection
 }
 impl IoTDevice {
@@ -262,7 +260,7 @@ impl IoTDevice {
             agg_c1: None, agg_c2: None,
             bp_gens: BulletproofGens::new(8, 1),
             ped_gens: PedersenGens::default(),
-            rates: HashMap::new(), last_recomp: 0,
+            rates: HashMap::new(),
             seen_nonces: HashMap::new(),
         })
     }
@@ -373,7 +371,6 @@ impl IoTDevice {
         RangeProof::from_bytes(&p.bulletproof).map_err(|_| AggError::InvalidProof("bad BP".into()))?.verify_single(&self.bp_gens, &self.ped_gens, &mut t, &expected_commit.compress(), 8).map_err(|_| AggError::InvalidProof("BP verify failed".into()))?;
         //Insert proof and maybe recompute aggregate
         self.verified_ciphertexts.insert(p.device_id, VerifiedCiphertext {timestamp: p.timestamp,c1,c2,});
-        self.maybe_recompute();
         Ok(())
     }
     
@@ -425,13 +422,6 @@ impl IoTDevice {
     }
     
     //Maybe recompute aggregate if enough time has passed
-    fn maybe_recompute(&mut self) {
-        let now = timestamp();
-        if now >= self.last_recomp + RECOMPUTE_INTERVAL {
-            self.recompute();
-            self.last_recomp = now;
-        }
-    }
     
     //Clean up old proofs and partials
     pub fn cleanup(&mut self) {
@@ -440,7 +430,6 @@ impl IoTDevice {
         self.verified_ciphertexts.retain(|_, vc| vc.timestamp > cutoff);
         self.partials.retain(|_, p| p.timestamp > cutoff);
         for device_id in expired_devices { self.seen_nonces.remove(&device_id); }
-        self.maybe_recompute();
     }
     
     //Compute final aggregate using threshold decryption

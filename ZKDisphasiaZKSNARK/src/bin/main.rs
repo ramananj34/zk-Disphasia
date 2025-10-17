@@ -19,8 +19,7 @@ use std::path::Path; //File operations
 
 //Config constants
 const PROOF_EXPIRY: u64 = 300; //proofs expire after 5 mins
-const RECOMPUTE_INTERVAL: u64 = 30; //reaggregate every 30s
-const MAX_DEVICES: usize = 10000; //max devices for discrete log
+const MAX_DEVICES: usize = 1000; //max devices for discrete log
 const RATE_WINDOW: u64 = 10; //rate limit window
 const MAX_MSGS_PER_WINDOW: u32 = 10; //max msgs per window
 const MAX_TOTAL_RATE: u32 = 50; //global max messages
@@ -316,7 +315,6 @@ pub struct IoTDevice {
     halo2_setup: Halo2Setup,
     threshold: usize,
     rates: HashMap<u32, (u64, u32)>,
-    last_recomp: u64,
     seen_nonces: HashMap<u32, HashSet<[u8; 32]>>,
 }
 impl IoTDevice {
@@ -338,7 +336,7 @@ impl IoTDevice {
             sig_key: SigningKey::generate(&mut OsRng), valid_participant_ids, halo2_setup,
             verified_ciphertexts: HashMap::new(), partials: HashMap::new(),
             agg_c1: None, agg_c2: None,
-            rates: HashMap::new(), last_recomp: 0,
+            rates: HashMap::new(),
             seen_nonces: HashMap::new(),
         })
     }
@@ -416,7 +414,6 @@ impl IoTDevice {
         verify_proof::<KZGCommitmentScheme<Bn256>, VerifierSHPLONK<'_, Bn256>, _, _, _>(&self.halo2_setup.params, &self.halo2_setup.vk, strategy,&[&[&instance_col_0[..], &instance_col_1[..], &instance_col_2[..]]], &mut transcript).map_err(|_| AggError::InvalidProof("Halo2 verify failed".into()))?;
         //Add to proofs
         self.verified_ciphertexts.insert(p.device_id, VerifiedCiphertext {timestamp: p.timestamp,c1,c2,});
-        self.maybe_recompute();
         Ok(())
     }
     //Generate our partial decryption share
@@ -465,14 +462,6 @@ impl IoTDevice {
         self.partials.insert(p.device_id, p);
         Ok(())
     }
-    //Maybe recompute aggregate if enough time has passed
-    fn maybe_recompute(&mut self) {
-        let now = timestamp();
-        if now >= self.last_recomp + RECOMPUTE_INTERVAL {
-            self.recompute();
-            self.last_recomp = now;
-        }
-    }
     //Clean up old proofs and partials
     pub fn cleanup(&mut self) {
         let cutoff = timestamp().saturating_sub(PROOF_EXPIRY);
@@ -480,7 +469,6 @@ impl IoTDevice {
         self.verified_ciphertexts.retain(|_, vc| vc.timestamp > cutoff);
         self.partials.retain(|_, p| p.timestamp > cutoff);
         for device_id in expired_devices { self.seen_nonces.remove(&device_id); }
-        self.maybe_recompute();
     }
     //Compute final aggregate using threshold decryption
     pub fn compute_aggregate(&mut self) -> Result<(usize, usize), AggError> {

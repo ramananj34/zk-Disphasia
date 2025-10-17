@@ -17,8 +17,7 @@ use std::error::Error; //Errors
 
 //Config constants
 const PROOF_EXPIRY: u64 = 300; //proofs expire after 5 mins
-const RECOMPUTE_INTERVAL: u64 = 30; //reaggregate every 30s
-const MAX_DEVICES: usize = 10000; //max devices for discrete log
+const MAX_DEVICES: usize = 1000; //max devices for discrete log
 const RATE_WINDOW: u64 = 10; //rate limit window
 const MAX_MSGS_PER_WINDOW: u32 = 10; //max msgs per window
 const MAX_TOTAL_RATE: u32 = 50; //global max messages
@@ -379,7 +378,6 @@ pub struct IoTDevice {
     stark_prover: BinaryProver,
     threshold: usize,
     rates: HashMap<u32, (u64, u32)>,
-    last_recomp: u64,
     seen_nonces: HashMap<u32, HashSet<[u8; 32]>>,
 }
 
@@ -403,7 +401,7 @@ impl IoTDevice {
             verified_ciphertexts: HashMap::new(), partials: HashMap::new(),
             agg_c1: None, agg_c2: None,
             stark_prover: BinaryProver::new(),
-            rates: HashMap::new(), last_recomp: 0,
+            rates: HashMap::new(),
             seen_nonces: HashMap::new(),
         })
     }
@@ -478,7 +476,6 @@ impl IoTDevice {
         let min_opts = AcceptableOptions::MinConjecturedSecurity(95);
         verify::<BinaryAir, Blake3_256<BaseElement>, DefaultRandomCoin<Blake3_256<BaseElement>>, MerkleTree<Blake3_256<BaseElement>>>(stark_proof, pub_inputs, &min_opts).map_err(|_| AggError::InvalidProof("STARK verify failed".into()))?;
         self.verified_ciphertexts.insert(p.device_id, VerifiedCiphertext {timestamp: p.timestamp,c1,c2,});
-        self.maybe_recompute();
         Ok(())
     }
     
@@ -529,14 +526,6 @@ impl IoTDevice {
         self.partials.insert(p.device_id, p);
         Ok(())
     }
-    //Maybe recompute aggregate if enough time has passed
-    fn maybe_recompute(&mut self) {
-        let now = timestamp();
-        if now >= self.last_recomp + RECOMPUTE_INTERVAL {
-            self.recompute();
-            self.last_recomp = now;
-        }
-    }
     //Clean up old proofs and partials
     pub fn cleanup(&mut self) {
         let cutoff = timestamp().saturating_sub(PROOF_EXPIRY);
@@ -544,7 +533,6 @@ impl IoTDevice {
         self.verified_ciphertexts.retain(|_, vc| vc.timestamp > cutoff);
         self.partials.retain(|_, p| p.timestamp > cutoff);
         for device_id in expired_devices { self.seen_nonces.remove(&device_id); }
-        self.maybe_recompute();
     }
     //Compute final aggregate using threshold decryption
     pub fn compute_aggregate(&mut self) -> Result<(usize, usize), AggError> {
