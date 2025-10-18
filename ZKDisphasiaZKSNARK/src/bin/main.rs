@@ -69,6 +69,13 @@ struct VerifiedCiphertext {
     c2: RistrettoPoint,
 }
 
+#[derive(Debug, Clone)]
+struct VerifiedPartial {
+    device_id: u32,
+    timestamp: u64,
+    partial: RistrettoPoint
+}
+
 //Halo2 circuit configuration
 #[derive(Clone, Debug)]
 struct BinaryConfig {
@@ -309,7 +316,7 @@ pub struct IoTDevice {
     peer_keys: HashMap<u32, ed_vf>,
     valid_participant_ids: HashSet<u32>,
     verified_ciphertexts: HashMap<u32, VerifiedCiphertext>,
-    partials: HashMap<u32, PartialDecryption>,
+    partials: HashMap<u32, VerifiedPartial>,
     agg_c1: Option<RistrettoPoint>,
     agg_c2: Option<RistrettoPoint>,
     halo2_setup: Halo2Setup,
@@ -459,7 +466,7 @@ impl IoTDevice {
         let public_key_share_point = frost_share_to_point(public_key_share)?;
         if !p.proof.verify_dlog(&sum_c1, &pt, &public_key_share_point, p.timestamp, p.device_id) { return Err(AggError::InvalidProof("Schnorr proof verification failed".into())); }
         //Add to list
-        self.partials.insert(p.device_id, p);
+        self.partials.insert(p.device_id, VerifiedPartial {device_id: p.device_id, timestamp: p.timestamp, partial: pt});
         Ok(())
     }
     //Clean up old proofs and partials
@@ -478,17 +485,11 @@ impl IoTDevice {
         if valid == 0 { return Ok((0, 0)); }
         if self.partials.len() < self.threshold { return Err(AggError::ThresholdNotMet); }
         //Start aggregate
-        let sum_c1 = self.agg_c1.ok_or(AggError::CryptoError("No agg".into()))?;
         let sum_c2 = self.agg_c2.ok_or(AggError::CryptoError("No agg".into()))?;
         //Verify partials and collect valid ones
         let mut verified = Vec::new();
-        for p in self.partials.values().take(self.threshold) {
-            let pt = p.partial.0.decompress().ok_or(AggError::CryptoError("bad partial".into()))?;
-            let frost_id = frost::Identifier::try_from(p.device_id as u16).map_err(|e| AggError::CryptoError(e.to_string()))?;
-            let public_key_share = self.group_pub.verifying_shares().get(&frost_id).ok_or(AggError::CryptoError("Unknown participant".into()))?;
-            let public_key_share_point = frost_share_to_point(public_key_share)?;
-            if !p.proof.verify_dlog(&sum_c1, &pt, &public_key_share_point, p.timestamp, p.device_id) { return Err(AggError::InvalidProof(format!("Failed for {}", p.device_id))); }
-            verified.push((p.device_id, pt));
+        for vp in self.partials.values().take(self.threshold) {
+            verified.push((vp.device_id, vp.partial));
         }
         //Check valid DKG participants
         for (id, _) in &verified {
