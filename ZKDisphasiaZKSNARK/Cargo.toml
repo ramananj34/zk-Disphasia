@@ -3,7 +3,7 @@ name = "ZK-DISPHASIA_ZKSNARK"
 version = "0.0.0"
 authors = ["Jude Ramanan"]
 edition = "2024"
-description = "Zero Knowledge Decentralized IoT Secure Protocol for Homomorphic Aggregation Schemes, Infrastructure, and Algorithms (Version using ZK-SNARK)"
+description = "Zero Knowledge Decentralized IoT Secure Protocol for Homomorphic Aggregation Schemes, Implementations, and Applications (Version using ZK-SNARK)"
 repository = "https://github.com/ramananj34/ZK-Disphasia"
 
 [dependencies]
