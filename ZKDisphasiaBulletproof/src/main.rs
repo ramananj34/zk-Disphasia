@@ -17,7 +17,7 @@ use std::error::Error; //Errors
 
 //Config constants
 const PROOF_EXPIRY: u64 = 300; //proofs expire after 5 mins
-const MAX_DEVICES: usize = 1000; //max devices for discrete log
+const MAX_DEVICES: usize = 10000; //max devices for discrete log
 const RATE_WINDOW: u64 = 10; //rate limit window
 const MAX_MSGS_PER_WINDOW: u32 = 10; //max msgs per window
 const MAX_TOTAL_RATE: u32 = 50; //global max messages
