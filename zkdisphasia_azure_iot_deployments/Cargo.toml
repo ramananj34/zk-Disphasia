@@ -11,12 +11,20 @@ name = "fixture_server"
 path = "src/bin/fixture_server.rs"
 
 [[bin]]
+name = "test_harness"
+path = "src/bin/test_harness.rs"
+
+[[bin]]
 name = "bullet_test"
 path = "src/bin/bullet_test.rs"
 
 [[bin]]
-name = "test_harness"
-path = "src/bin/test_harness.rs"
+name = "snark_test"
+path = "src/bin/snark_test.rs"
+
+[[bin]]
+name = "stark_test"
+path = "src/bin/stark_test.rs"
 
 [dependencies]
 curve25519-dalek-ng = { version = "4.1", features = ["u64_backend", "serde"], default-features = false } #My curve
@@ -30,3 +38,6 @@ zeroize = "1.5" #Data deletion
 subtle = "2.5" #Constant time operations
 serde = { version = "1.0", features = ["derive"] } #Serialization/deserialization
 serde_with = "3.14" #Serialization/deserialization
+halo2_proofs = { git = "https://github.com/privacy-scaling-explorations/halo2.git", tag = "v2023_04_20" } #Halo2
+blake2b_simd = "1.0" #Transcript
+halo2_gadgets = "0.3"
