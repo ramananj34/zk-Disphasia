@@ -1,0 +1,32 @@
+[package]
+name = "zk-disphasia_azure_test"
+version = "0.0.0"
+authors = ["Jude Ramanan"]
+edition = "2024"
+description = "Zero Knowledge Decentralized IoT Secure Protocol for Homomorphic Aggregation Schemes, Implementations, and Applications (Azure Testing Version)"
+repository = "https://github.com/ramananj34/ZK-Disphasia"
+
+[[bin]]
+name = "fixture_server"
+path = "src/bin/fixture_server.rs"
+
+[[bin]]
+name = "bullet_test"
+path = "src/bin/bullet_test.rs"
+
+[[bin]]
+name = "test_harness"
+path = "src/bin/test_harness.rs"
+
+[dependencies]
+curve25519-dalek-ng = { version = "4.1", features = ["u64_backend", "serde"], default-features = false } #My curve
+ed25519-dalek = { version = "2.0", features = ["rand_core"] } #Digital signatures
+bulletproofs = "4.0" #Bulletproofs
+merlin = "3.0" #Transcripts
+frost-ristretto255 = "1.0" #FROST
+rand = "0.8" #Random support
+rand_core = "0.6" #Random support
+zeroize = "1.5" #Data deletion
+subtle = "2.5" #Constant time operations
+serde = { version = "1.0", features = ["derive"] } #Serialization/deserialization
+serde_with = "3.14" #Serialization/deserialization
