@@ -134,7 +134,7 @@ pub struct IoTDevice {
     seen_nonces: HashMap<u32, std::collections::HashSet<[u8; 32]>> //Replay protection
 }
 impl IoTDevice {
-    pub fn new(id: u32, threshold: usize, frost_key: frost::keys::KeyPackage, group_pub: frost::keys::PublicKeyPackage, peer_keys: HashMap<u32, VerifyingKey>) -> Result<Self, AggError> {
+    pub fn new(id: u32, threshold: usize, frost_key: frost::keys::KeyPackage, group_pub: frost::keys::PublicKeyPackage, peer_keys: HashMap<u32, VerifyingKey>, signing_key: Option<SigningKey>) -> Result<Self, AggError> {
         //Basic checks
         if id == 0 { return Err(AggError::CryptoError("Device ID cannot be zero (Lagrange requirement)".into())); }
         if threshold == 0 { return Err(AggError::CryptoError("Threshold must be at least 1".into())); }
@@ -146,10 +146,11 @@ impl IoTDevice {
         let mut valid_participant_ids = HashSet::new();
         valid_participant_ids.insert(id);
         for peer_id in peer_keys.keys() { valid_participant_ids.insert(*peer_id); }
+        let sig_key = signing_key.unwrap_or_else(|| SigningKey::generate(&mut OsRng));
         //Simple initialization
         Ok(Self {
             id, threshold, frost_key, group_pub, peer_keys,
-            sig_key: SigningKey::generate(&mut OsRng), valid_participant_ids,
+            sig_key, valid_participant_ids,
             verified_ciphertexts: HashMap::new(), partials: HashMap::new(),
             agg_c1: None, agg_c2: None,
             bp_gens: BulletproofGens::new(8, 1),

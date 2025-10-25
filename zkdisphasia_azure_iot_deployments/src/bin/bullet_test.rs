@@ -52,7 +52,7 @@ fn main() -> Result<(), AggError> {
     let mut devs = Vec::new();
     let mut all_keys = HashMap::new();
     for (id, kpkg, ppkg) in &dkg {
-        let d = IoTDevice::new(*id, t, kpkg.clone(), ppkg.clone(), HashMap::new())?;
+        let d = IoTDevice::new(*id, t, kpkg.clone(), ppkg.clone(), HashMap::new(), None)?;
         all_keys.insert(*id, d.sig_key.verifying_key());
         devs.push(d);
     }

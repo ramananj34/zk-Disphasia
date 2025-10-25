@@ -233,7 +233,7 @@ impl FixtureCache {
         let public_package = frost::keys::PublicKeyPackage::deserialize(&device_output.public_package).map_err(|e| AggError::CryptoError(format!("PublicKeyPackage deser: {:?}", e)))?;
         let sig_seed = Self::generate_seed(b"signing_key", ceremony.n, ceremony.t, device_id, 0);
         let mut sig_rng = ChaCha20Rng::from_seed(sig_seed);
-        let _signing_key = SigningKey::generate(&mut sig_rng);
+        let signing_key = SigningKey::generate(&mut sig_rng);
         let mut all_signing_keys = HashMap::new();
         for d in &ceremony.completed_dkg {
             let s_seed = Self::generate_seed(b"signing_key", ceremony.n, ceremony.t, d.device_id, 0);
@@ -242,9 +242,9 @@ impl FixtureCache {
             all_signing_keys.insert(d.device_id, s_key.verifying_key());
         }
         let proof_bytes = match zkp_type {
-            ZKPType::Bulletproof => { let device = bulletproof::IoTDevice::new(device_id, ceremony.t, key_package, public_package, all_signing_keys)?; let proof = device.generate_proof(state)?; bincode::serialize(&proof).map_err(|e| AggError::CryptoError(format!("Proof serialize: {}", e)))? },
-            ZKPType::SNARK => { let setup = halo2_setup.ok_or_else(|| AggError::CryptoError("Halo2 setup not available".into()))?; let device = snark::IoTDevice::new(device_id, ceremony.t, key_package, public_package, all_signing_keys, setup.clone())?; let proof = device.generate_proof(state)?; bincode::serialize(&proof).map_err(|e| AggError::CryptoError(format!("Proof serialize: {}", e)))? },
-            ZKPType::STARK => { let device = stark::IoTDevice::new(device_id, ceremony.t, key_package, public_package, all_signing_keys)?; let proof = device.generate_proof(state)?; bincode::serialize(&proof).map_err(|e| AggError::CryptoError(format!("Proof serialize: {}", e)))? }
+            ZKPType::Bulletproof => { let device = bulletproof::IoTDevice::new(device_id, ceremony.t, key_package, public_package, all_signing_keys, Some(signing_key))?; let proof = device.generate_proof(state)?; bincode::serialize(&proof).map_err(|e| AggError::CryptoError(format!("Proof serialize: {}", e)))? },
+            ZKPType::SNARK => { let setup = halo2_setup.ok_or_else(|| AggError::CryptoError("Halo2 setup not available".into()))?; let device = snark::IoTDevice::new(device_id, ceremony.t, key_package, public_package, all_signing_keys, setup.clone(), Some(signing_key))?; let proof = device.generate_proof(state)?; bincode::serialize(&proof).map_err(|e| AggError::CryptoError(format!("Proof serialize: {}", e)))? },
+            ZKPType::STARK => { let device = stark::IoTDevice::new(device_id, ceremony.t, key_package, public_package, all_signing_keys, Some(signing_key))?; let proof = device.generate_proof(state)?; bincode::serialize(&proof).map_err(|e| AggError::CryptoError(format!("Proof serialize: {}", e)))? }
         };
         Ok(proof_bytes)
     }

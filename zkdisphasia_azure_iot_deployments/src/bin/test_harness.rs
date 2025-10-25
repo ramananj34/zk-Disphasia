@@ -762,6 +762,7 @@ impl TestRunner {
                     key_package,
                     public_package,
                     peer_keys,
+                    None
                 )?;
                 let proof = device.generate_proof(state)?;
                 bincode::serialize(&proof)?
@@ -776,6 +777,7 @@ impl TestRunner {
                     public_package,
                     peer_keys,
                     setup.clone(),
+                    None
                 )?;
                 let proof = device.generate_proof(state)?;
                 bincode::serialize(&proof)?
@@ -787,6 +789,7 @@ impl TestRunner {
                     key_package,
                     public_package,
                     peer_keys,
+                    None
                 )?;
                 let proof = device.generate_proof(state)?;
                 bincode::serialize(&proof)?
@@ -838,6 +841,7 @@ impl TestRunner {
                     key_package,
                     public_package,
                     peer_keys,
+                    None
                 )?;
                 let proof: bulletproof::DeviceProof = bincode::deserialize(&proof_bytes)?;
                 device.receive_proof(proof)?;
@@ -852,6 +856,7 @@ impl TestRunner {
                     public_package,
                     peer_keys,
                     setup.clone(),
+                    None
                 )?;
                 let proof: snark::DeviceProof = bincode::deserialize(&proof_bytes)?;
                 device.receive_proof(proof)?;
@@ -863,6 +868,7 @@ impl TestRunner {
                     key_package,
                     public_package,
                     peer_keys,
+                    None
                 )?;
                 let proof: stark::DeviceProof = bincode::deserialize(&proof_bytes)?;
                 device.receive_proof(proof)?;
