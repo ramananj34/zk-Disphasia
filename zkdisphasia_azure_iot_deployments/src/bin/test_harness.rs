@@ -61,17 +61,72 @@ impl TestRunner {
     fn run_all_tests(&mut self) { //Run all tests with optimized structure (shared functions once, ZKP-specific per type)
         let network_sizes = vec![5, 10, 20, 50]; //let network_sizes = vec![5, 10, 20, 50, 100, 500, 1000, 2500, 5000, 10000];
         let threshold_ratios = vec![0.5, 0.67, 0.75];
-        let shared_functions = vec![TestFunction::DKG1, TestFunction::DKG2, TestFunction::DKG3, TestFunction::PartialGen, TestFunction::PartialVerify, TestFunction::AggCompute]; //Shared functions (tested once per n, t)
-        let zkp_functions = vec![TestFunction::ProofGen, TestFunction::ProofVerify]; //ZKP-specific functions (tested per zkp_type, n, t)
+        let network_scaled_functions = vec![TestFunction::DKG1, TestFunction::DKG2, TestFunction::DKG3, TestFunction::PartialGen, TestFunction::AggCompute]; // Functions that scale with network
+        let zkp_functions = vec![TestFunction::ProofGen, TestFunction::ProofVerify]; // ZKP-specific functions (test once per type)
         let zkp_types = vec![ZKPType::Bulletproof, ZKPType::SNARK, ZKPType::STARK];
+
         let mut test_count = 0;
-        let total_tests = (network_sizes.len() * threshold_ratios.len() * shared_functions.len() * 30) + (zkp_types.len() * network_sizes.len() * threshold_ratios.len() * zkp_functions.len() * 30);
+        let total_tests = (network_sizes.len() * threshold_ratios.len() * network_scaled_functions.len() * 30) + (30) + (zkp_types.len() * zkp_functions.len() * 30);
         println!("=== Starting Test Suite ===\nVM Profile: {}\nTotal tests to run: {}\n", self.vm_profile, total_tests);
+
         let mut success_count = 0; let mut failure_count = 0;
-        println!("Testing shared functions (DKG, Partial, Aggregate)..."); //Test shared functions (no ZKP type needed)
-        for n in &network_sizes { for t_ratio in &threshold_ratios { let t = (*n as f64 * t_ratio).ceil() as usize; for function in &shared_functions { for run in 1..=30 { test_count += 1; let config = TestConfig { zkp_type: None, function: *function, n: *n, t, device_id: self.device_id, run }; println!("[{}/{}] {:?} n={} t={} run={}", test_count, total_tests, function, n, t, run); match self.run_single_test(&config) { Ok(metrics) => { self.write_metrics(&metrics); if metrics.status == "SUCCESS" { success_count += 1; } else { failure_count += 1; } } Err(e) => { eprintln!("  Error: {}", e); failure_count += 1; } } } } } }
-        println!("\nTesting ZKP-specific functions (ProofGen, ProofVerify)..."); //Test ZKP-specific functions
-        for zkp_type in &zkp_types { println!("\n--- Testing {:?} ---", zkp_type); for n in &network_sizes { for t_ratio in &threshold_ratios { let t = (*n as f64 * t_ratio).ceil() as usize; for function in &zkp_functions { for run in 1..=30 { test_count += 1; let config = TestConfig { zkp_type: Some(*zkp_type), function: *function, n: *n, t, device_id: self.device_id, run }; println!("[{}/{}] {:?} {:?} n={} t={} run={}", test_count, total_tests, zkp_type, function, n, t, run); match self.run_single_test(&config) { Ok(metrics) => { self.write_metrics(&metrics); if metrics.status == "SUCCESS" { success_count += 1; } else { failure_count += 1; } } Err(e) => { eprintln!("  Error: {}", e); failure_count += 1; } } } } } } }
+
+        println!("Testing network-scaled functions (DKG, PartialGen, Aggregate)..."); // Test network-scaled functions
+        for n in &network_sizes { 
+            for t_ratio in &threshold_ratios { 
+                let t = (*n as f64 * t_ratio).ceil() as usize; 
+                for function in &network_scaled_functions { 
+                    for run in 1..=30 { 
+                        test_count += 1; 
+                        let config = TestConfig { zkp_type: None, function: *function, n: *n, t, device_id: self.device_id, run }; 
+                        println!("[{}/{}] {:?} n={} t={} run={}", test_count, total_tests, function, n, t, run); 
+                        match self.run_single_test(&config) { 
+                            Ok(metrics) => { 
+                                self.write_metrics(&metrics); 
+                                if metrics.status == "SUCCESS" { success_count += 1; } else { failure_count += 1; } 
+                            } 
+                            Err(e) => { eprintln!("  Error: {}", e); failure_count += 1; } 
+                        } 
+                    } 
+                } 
+            } 
+        }
+
+        println!("\nTesting PartialVerify (single config)..."); // Test PartialVerify once
+        let n = 5; let t = 3;
+        for run in 1..=30 {
+            test_count += 1;
+            let config = TestConfig { zkp_type: None, function: TestFunction::PartialVerify, n, t, device_id: self.device_id, run };
+            println!("[{}/{}] PartialVerify n={} t={} run={}", test_count, total_tests, n, t, run);
+            match self.run_single_test(&config) {
+                Ok(metrics) => {
+                    self.write_metrics(&metrics);
+                    if metrics.status == "SUCCESS" { success_count += 1; } else { failure_count += 1; }
+                }
+                Err(e) => { eprintln!("  Error: {}", e); failure_count += 1; }
+            }
+        }
+
+        println!("\nTesting ZKP-specific functions (ProofGen, ProofVerify) per ZKP type..."); // Test ZKP-specific functions once per type
+        let n = 5; let t = 3;
+        for zkp_type in &zkp_types { 
+            println!("\n--- Testing {:?} ---", zkp_type); 
+            for function in &zkp_functions { 
+                for run in 1..=30 { 
+                    test_count += 1; 
+                    let config = TestConfig { zkp_type: Some(*zkp_type), function: *function, n, t, device_id: self.device_id, run }; 
+                    println!("[{}/{}] {:?} {:?} n={} t={} run={}", test_count, total_tests, zkp_type, function, n, t, run); 
+                    match self.run_single_test(&config) { 
+                        Ok(metrics) => { 
+                            self.write_metrics(&metrics); 
+                            if metrics.status == "SUCCESS" { success_count += 1; } else { failure_count += 1; } 
+                        } 
+                        Err(e) => { eprintln!("  Error: {}", e); failure_count += 1; } 
+                    } 
+                } 
+            } 
+        }
+
         println!("\n=== Test Suite Complete ===\nTotal tests: {}\nSuccesses: {}\nFailures: {}\nSuccess rate: {:.1}%", test_count, success_count, failure_count, (success_count as f64 / test_count as f64) * 100.0);
     }
     fn run_single_test(&mut self, config: &TestConfig) -> Result<Metrics, Box<dyn std::error::Error>> { //Run a single test with full instrumentation
