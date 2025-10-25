@@ -270,6 +270,7 @@ struct TestRunner {
     vm_profile: String,
     device_id: u32,
     halo2_setup: Option<snark::Halo2Setup>,
+    peer_keys_cache: HashMap<(usize, usize), HashMap<u32, VerifyingKey>>,
 }
 
 impl TestRunner {
@@ -294,7 +295,26 @@ impl TestRunner {
             vm_profile: args.vm_profile.clone(),
             device_id: args.device_id,
             halo2_setup,
+            peer_keys_cache: HashMap::new(),
         })
+    }
+
+    fn get_cached_peer_keys(&mut self, n: usize, t: usize) -> Result<HashMap<u32, VerifyingKey>, Box<dyn std::error::Error>> {
+        // Check cache
+        if let Some(cached) = self.peer_keys_cache.get(&(n, t)) {
+            return Ok(cached.clone());
+        }
+        
+        // Fetch and cache
+        let mut peer_keys = HashMap::new();
+        for i in 1..=n {
+            let dev_out = self.fixture_client.get_dkg_completed(n, t, i as u32)?;
+            let vk = VerifyingKey::from_bytes(&dev_out.signing_pubkey)?;
+            peer_keys.insert(i as u32, vk);
+        }
+        
+        self.peer_keys_cache.insert((n, t), peer_keys.clone());
+        Ok(peer_keys)
     }
     
     /// Run all tests with optimized structure
@@ -657,13 +677,7 @@ impl TestRunner {
             .map_err(|e| format!("PublicPackage deser: {:?}", e))?;
         
         // Get peer keys (all devices)
-        let mut peer_keys = HashMap::new();
-        for i in 1..=config.n {
-            let dev_out = self.fixture_client.get_dkg_completed(config.n, config.t, i as u32)?;
-            let vk = VerifyingKey::from_bytes(&dev_out.signing_pubkey)
-                .map_err(|e| format!("VerifyingKey: {:?}", e))?;
-            peer_keys.insert(i as u32, vk);
-        }
+        let peer_keys = self.get_cached_peer_keys(config.n, config.t)?;
         
         let ciphertexts = self.fixture_client.get_ciphertexts(
             ZKPType::Bulletproof,
@@ -743,13 +757,7 @@ impl TestRunner {
             .map_err(|e| format!("PublicPackage deser: {:?}", e))?;
         
         // Get peer keys
-        let mut peer_keys = HashMap::new();
-        for i in 1..=config.n {
-            let dev_out = self.fixture_client.get_dkg_completed(config.n, config.t, i as u32)?;
-            let vk = VerifyingKey::from_bytes(&dev_out.signing_pubkey)
-                .map_err(|e| format!("VerifyingKey: {:?}", e))?;
-            peer_keys.insert(i as u32, vk);
-        }
+        let peer_keys = self.get_cached_peer_keys(config.n, config.t)?;
         
         let state = 1u8;  // Test with state=1
         
@@ -824,13 +832,7 @@ impl TestRunner {
             .map_err(|e| format!("PublicPackage deser: {:?}", e))?;
         
         // Get peer keys
-        let mut peer_keys = HashMap::new();
-        for i in 1..=config.n {
-            let dev_out = self.fixture_client.get_dkg_completed(config.n, config.t, i as u32)?;
-            let vk = VerifyingKey::from_bytes(&dev_out.signing_pubkey)
-                .map_err(|e| format!("VerifyingKey: {:?}", e))?;
-            peer_keys.insert(i as u32, vk);
-        }
+        let peer_keys = self.get_cached_peer_keys(config.n, config.t)?;
         
         // === MEASURED OPERATION (ZKP-specific) ===
         match zkp_type {
