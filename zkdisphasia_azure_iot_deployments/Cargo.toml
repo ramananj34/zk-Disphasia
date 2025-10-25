@@ -15,6 +15,10 @@ name = "test_harness"
 path = "src/bin/test_harness.rs"
 
 [[bin]]
+name = "snark_setup"
+path = "src/bin/snark_setup.rs"
+
+[[bin]]
 name = "bullet_test"
 path = "src/bin/bullet_test.rs"
 
@@ -23,12 +27,12 @@ name = "snark_test"
 path = "src/bin/snark_test.rs"
 
 [[bin]]
-name = "snark_setup"
-path = "src/bin/snark_setup.rs"
-
-[[bin]]
 name = "stark_test"
 path = "src/bin/stark_test.rs"
+
+[[bin]]
+name = "fixture_server_test"
+path = "src/bin/fixture_server_test.rs"
 
 [dependencies]
 curve25519-dalek-ng = { version = "4.1", features = ["u64_backend", "serde"], default-features = false } #My curve
@@ -48,3 +52,14 @@ halo2_gadgets = "0.3"
 winterfell = { version = "0.10", features = ["concurrent"] } #Winterfell
 winter-utils = "0.10" #Winterfell
 winter-prover = "0.10" #Winterfell
+actix-web = "4"
+actix-rt = "2"
+base64 = "0.22"
+sha2 = "0.10"
+serde_json = "1"
+rand_chacha = "0.3"
+bincode = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+clap = { version = "4.4", features = ["derive"] }
+chrono = "0.4"

@@ -11,9 +11,9 @@ use halo2_proofs::halo2curves::bn256::Bn256;
 ////////////////////////////////////////////////////////////////////////////
 /// Config
 
-const HALO2_K: u32 = 8;
+const HALO2_K: u32 = 5;
 const PARAMS_DIR: &str = "./trusted_setup";
-const PARAMS_FILE: &str = "kzg_bn254_8.params";
+const PARAMS_FILE: &str = "kzg_bn254_5.params";
 
 ////////////////////////////////////////////////////////////////////////////
 /// Setup

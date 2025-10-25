@@ -16,8 +16,8 @@ use std::path::Path; //File operations
 use crate::common::{SerCompressed, SerScalar, AggError, VerifiedCiphertext, VerifiedPartial, PartialDecryption, PROTOCOL_VERSION, MAX_DEVICES, MAX_STORED_PROOFS, MAX_CLOCK_SKEW,MAX_NONCES_PER_DEVICE, PROOF_EXPIRY, timestamp, frost_to_point, check_rate};
 
 const MAX_PROOF_SIZE: usize = 8192; //prevent DoS attacks
-const _HALO2_K: u32 = 8;
-const PARAMS_PATH: &str = "./trusted_setup/kzg_bn254_8.params";
+const _HALO2_K: u32 = 5;
+const PARAMS_PATH: &str = "./trusted_setup/kzg_bn254_5.params";
 
 //Load KZG parameters
 pub fn load_kzg_params() -> Result<ParamsKZG<Bn256>, AggError> {

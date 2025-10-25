@@ -51,12 +51,16 @@ macro_rules! serde_wrapper {
 serde_wrapper!(SerCompressed, CompressedRistretto, 32, CompressedRistretto);
 serde_wrapper!(SerScalar, Scalar, 32, Scalar::from_bytes_mod_order);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifiedCiphertext {
     pub timestamp: u64,
+    #[serde(serialize_with = "ser_point", deserialize_with = "de_point")]
     pub c1: RistrettoPoint,
+    #[serde(serialize_with = "ser_point", deserialize_with = "de_point")]
     pub c2: RistrettoPoint,
 }
+fn ser_point<S>(point: &RistrettoPoint, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer, { serializer.serialize_bytes(point.compress().as_bytes()) }
+fn de_point<'de, D>(deserializer: D) -> Result<RistrettoPoint, D::Error> where D: Deserializer<'de>,{let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;if bytes.len() != 32 {return Err(serde::de::Error::custom("Invalid point length"));}CompressedRistretto::from_slice(&bytes).decompress().ok_or_else(|| serde::de::Error::custom("Invalid RistrettoPoint"))}
 
 #[derive(Debug, Clone)]
 pub struct VerifiedPartial {
