@@ -342,8 +342,8 @@ impl TestRunner {
         let zkp_types = vec![ZKPType::Bulletproof, ZKPType::SNARK, ZKPType::STARK];
         
         let mut test_count = 0;
-        let total_tests = (network_sizes.len() * threshold_ratios.len() * shared_functions.len() * 10) +
-                          (zkp_types.len() * network_sizes.len() * threshold_ratios.len() * zkp_functions.len() * 10);
+        let total_tests = (network_sizes.len() * threshold_ratios.len() * shared_functions.len() * 30) +
+                          (zkp_types.len() * network_sizes.len() * threshold_ratios.len() * zkp_functions.len() * 30);
         
         println!("=== Starting Test Suite ===");
         println!("VM Profile: {}", self.vm_profile);
@@ -360,7 +360,7 @@ impl TestRunner {
                 let t = (*n as f64 * t_ratio).ceil() as usize;
                 
                 for function in &shared_functions {
-                    for run in 1..=10 {
+                    for run in 1..=30 {
                         test_count += 1;
                         
                         let config = TestConfig {
@@ -404,7 +404,7 @@ impl TestRunner {
                     let t = (*n as f64 * t_ratio).ceil() as usize;
                     
                     for function in &zkp_functions {
-                        for run in 1..=10 {
+                        for run in 1..=30 {
                             test_count += 1;
                             
                             let config = TestConfig {
@@ -448,6 +448,12 @@ impl TestRunner {
     
     /// Run a single test with full instrumentation
     fn run_single_test(&mut self, config: &TestConfig) -> Result<Metrics, Box<dyn std::error::Error>> {
+        if config.run <= 2 {
+        // Run twice to warm up CPU caches and JIT
+            let _ = self.run_function(config);
+            let _ = self.run_function(config);
+            std::thread::sleep(std::time::Duration::from_millis(10)); // Let things settle
+        }
         let initial_rss = Self::get_rss_kb()?;
         let wall_start = Instant::now();
         
