@@ -10,7 +10,7 @@ use rand::rngs::OsRng;
 use std::collections::{HashMap, BTreeMap};
 use std::error::Error;
 
-pub const PROOF_EXPIRY: u64 = 864000;
+pub const PROOF_EXPIRY: u64 = 86400;
 pub const MAX_DEVICES: usize = 10000;
 pub const RATE_WINDOW: u64 = 10;
 pub const MAX_MSGS_PER_WINDOW: u32 = 10;

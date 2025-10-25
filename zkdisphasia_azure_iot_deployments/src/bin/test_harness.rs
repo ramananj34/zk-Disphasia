@@ -439,6 +439,16 @@ impl TestRunner {
         let delta_rss = peak_rss as i64 - initial_rss as i64;
         let (user_time_us, system_time_us) = Self::get_cpu_times()?;
         let (disk_read_kb, disk_write_kb) = Self::get_io_stats()?;
+
+        // Estimate CPU cycles and energy
+        let cpu_freq = match std::env::consts::ARCH {
+            "x86_64" => 2_500_000_000u64,
+            "aarch64" => 2_000_000_000u64,
+            _ => 2_000_000_000u64,
+        };
+        let total_cpu_us = user_time_us + system_time_us;
+        let estimated_cycles = (total_cpu_us as u64) * (cpu_freq / 1_000_000);
+        let energy_joules = estimated_cycles as f64 * 0.5e-9;
         
         let mut metrics = Metrics {
             timestamp: Self::timestamp_iso8601(),
@@ -455,10 +465,10 @@ impl TestRunner {
             delta_rss_kb: delta_rss,
             disk_read_kb,
             disk_write_kb,
-            cycles: None,
+            cycles: Some(estimated_cycles),
             instructions: None,
             cache_misses: None,
-            energy_estimate_joules: None,
+            energy_estimate_joules: Some(energy_joules),
             output_size_bytes: result.ok(),
         };
         
@@ -522,7 +532,7 @@ impl TestRunner {
 
         for (i, pkg_bytes) in r1_packages_bytes.iter().enumerate() {
             let pkg = frost::keys::dkg::round1::Package::deserialize(&pkg_bytes[..])?;
-            let id = frost::Identifier::try_from(all_ids[i])?;  // ✅ CORRECT
+            let id = frost::Identifier::try_from(all_ids[i])?;
             received_r1.insert(id, pkg);
         }
         
@@ -558,14 +568,14 @@ impl TestRunner {
         let mut received_r1 = BTreeMap::new();
         for (i, pkg_bytes) in r1_packages_bytes.iter().enumerate() {
             let pkg = frost::keys::dkg::round1::Package::deserialize(&pkg_bytes[..])?;
-            let id = frost::Identifier::try_from(all_ids[i])?;  // ✅ CORRECT
+            let id = frost::Identifier::try_from(all_ids[i])?;
             received_r1.insert(id, pkg);
         }
         
         let mut received_r2 = BTreeMap::new();
         for (i, pkg_bytes) in r2_packages_bytes.iter().enumerate() {
             let pkg = frost::keys::dkg::round2::Package::deserialize(&pkg_bytes[..])?;
-            let id = frost::Identifier::try_from(all_ids[i])?;  // ✅ CORRECT
+            let id = frost::Identifier::try_from(all_ids[i])?;
             received_r2.insert(id, pkg);
         }
         

@@ -121,6 +121,111 @@ def function_comparison(df):
     
     return success_df
 
+def verify_metrics(df):
+    """Verify which metrics are present in the logs"""
+    print("\n" + "="*60)
+    print("METRICS VERIFICATION")
+    print("="*60)
+    
+    success_df = df[df['status'] == 'SUCCESS']
+    
+    if len(success_df) == 0:
+        print("⚠ No successful tests to analyze!")
+        return
+    
+    # Expected metrics
+    expected_metrics = {
+        'wall_time_us': 'Wall time',
+        'cpu_time_user_us': 'CPU time (user)',
+        'cpu_time_system_us': 'CPU time (system)',
+        'peak_rss_kb': 'Peak memory (RSS)',
+        'initial_rss_kb': 'Initial memory',
+        'delta_rss_kb': 'Memory delta',
+        'disk_read_kb': 'Disk read',
+        'disk_write_kb': 'Disk write',
+        'cycles': 'CPU cycles',
+        'energy_estimate_joules': 'Energy estimate',
+        'output_size_bytes': 'Output size',
+        'instructions': 'CPU instructions',
+        'cache_misses': 'Cache misses'
+    }
+    
+    print("\nMetric Presence Check:")
+    print("-" * 60)
+    
+    for col, name in expected_metrics.items():
+        if col in success_df.columns:
+            # Check how many non-null values
+            non_null = success_df[col].notna().sum()
+            total = len(success_df)
+            pct = (non_null / total) * 100
+            
+            if non_null == 0:
+                status = "❌ MISSING"
+                detail = "(column exists but all values are null)"
+            elif non_null < total:
+                status = "⚠️  PARTIAL"
+                detail = f"({non_null}/{total} = {pct:.1f}%)"
+            else:
+                status = "✅ PRESENT"
+                detail = f"({non_null} values)"
+            
+            print(f"{name:25} {status:12} {detail}")
+        else:
+            print(f"{name:25} ❌ MISSING  (column doesn't exist)")
+    
+    # Show sample of first successful test
+    print("\n" + "="*60)
+    print("SAMPLE TEST RESULT (first successful test)")
+    print("="*60)
+    
+    sample = success_df.iloc[0]
+    
+    print(f"\nTest: {sample.get('function', 'N/A')} "
+          f"(n={sample.get('n', 'N/A')}, t={sample.get('t', 'N/A')})")
+    print("\nMetrics:")
+    print(f"  Wall time:        {sample.get('wall_time_us', 0)/1000:.2f} ms")
+    print(f"  CPU time (user):  {sample.get('cpu_time_user_us', 0)/1000:.2f} ms")
+    print(f"  CPU time (sys):   {sample.get('cpu_time_system_us', 0)/1000:.2f} ms")
+    print(f"  Peak memory:      {sample.get('peak_rss_kb', 0)/1024:.2f} MB")
+    print(f"  Memory delta:     {sample.get('delta_rss_kb', 0)/1024:.2f} MB")
+    print(f"  Disk read:        {sample.get('disk_read_kb', 0)} KB")
+    print(f"  Disk write:       {sample.get('disk_write_kb', 0)} KB")
+    
+    if pd.notna(sample.get('cycles')):
+        print(f"  CPU cycles:       {sample.get('cycles', 0):,}")
+    else:
+        print(f"  CPU cycles:       None")
+    
+    if pd.notna(sample.get('energy_estimate_joules')):
+        print(f"  Energy:           {sample.get('energy_estimate_joules', 0):.6f} J")
+    else:
+        print(f"  Energy:           None")
+    
+    if pd.notna(sample.get('instructions')):
+        print(f"  Instructions:     {sample.get('instructions', 0):,}")
+    else:
+        print(f"  Instructions:     None")
+    
+    if pd.notna(sample.get('cache_misses')):
+        print(f"  Cache misses:     {sample.get('cache_misses', 0):,}")
+    else:
+        print(f"  Cache misses:     None")
+    
+    print(f"  Output size:      {sample.get('output_size_bytes', 0)} bytes")
+    
+    # Show raw JSON for verification
+    print("\n" + "="*60)
+    print("RAW JSON (for debugging)")
+    print("="*60)
+    
+    # Get the raw JSON line
+    import json
+    raw_json = json.dumps(sample.to_dict(), indent=2)
+    print(raw_json[:1000])  # First 1000 chars
+    if len(raw_json) > 1000:
+        print("\n... (truncated)")
+
 def network_size_scaling(df):
     """Analyze how metrics scale with network size"""
     print("\n" + "="*60)
@@ -306,6 +411,8 @@ def main():
     
     # Load data
     df = load_logs(args.logfile)
+
+    verify_metrics(df)
     
     # Run analyses
     basic_statistics(df)
