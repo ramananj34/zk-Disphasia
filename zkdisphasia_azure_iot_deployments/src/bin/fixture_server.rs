@@ -84,7 +84,7 @@ impl FixtureCache {
         println!("Loading Halo2 trusted setup...");
         cache.halo2_setup = Some(snark::setup_halo2()?);
         println!("✓ Halo2 setup loaded\n");
-        //Step 2: Pre-compute DKG ceremonies for all (n, t) combinations
+        //Step 2: Pre-compute DKG ceremonies and artifacts for all (n, t) combinations
         let total_configs = NETWORK_SIZES.len() * THRESHOLD_RATIOS.len();
         let mut config_num = 0;
         for &n in NETWORK_SIZES {
@@ -94,12 +94,35 @@ impl FixtureCache {
                 println!("[{}/{}] Computing DKG ceremony for n={}, t={}...", config_num, total_configs, n, t);
                 let ceremony = Self::run_complete_dkg_ceremony(n, t)?;
                 cache.dkg_ceremonies.insert((n, t), ceremony.clone());
-                //Step 3: For each ZKP type, generate artifacts
-                for zkp_type in [ZKPType::Bulletproof, ZKPType::SNARK, ZKPType::STARK] {
-                    println!("  Generating {} artifacts...", zkp_type);
-                    let artifacts = Self::generate_zkp_artifacts(zkp_type, &ceremony, cache.halo2_setup.as_ref())?;
-                    cache.zkp_artifacts.insert((zkp_type, n, t), artifacts);
+                
+                //Generate shared artifacts once (ciphertexts, partials)
+                println!("  Generating shared artifacts...");
+                let shared_artifacts = Self::generate_shared_artifacts(&ceremony)?;
+                
+                //Check if this is the config used for ZKP testing (n=5, t=3)
+                if n == 5 && t == 3 {
+                    println!("  Generating ZKP-specific proofs for n=5, t=3...");
+                    //Generate actual proofs for each ZKP type
+                    for zkp_type in [ZKPType::Bulletproof, ZKPType::SNARK, ZKPType::STARK] {
+                        println!("    {} proof...", zkp_type);
+                        let proof = Self::generate_single_proof(zkp_type, &ceremony, cache.halo2_setup.as_ref(), 1, 1)?;
+                        
+                        //Clone shared artifacts and add the real proof
+                        let mut artifacts = shared_artifacts.clone();
+                        artifacts.zkp_type = zkp_type;
+                        artifacts.sample_proof = proof;
+                        
+                        cache.zkp_artifacts.insert((zkp_type, n, t), artifacts);
+                    }
+                } else {
+                    //For other configs, store shared artifacts under each ZKP type (for API compatibility)
+                    for zkp_type in [ZKPType::Bulletproof, ZKPType::SNARK, ZKPType::STARK] {
+                        let mut artifacts = shared_artifacts.clone();
+                        artifacts.zkp_type = zkp_type;
+                        cache.zkp_artifacts.insert((zkp_type, n, t), artifacts);
+                    }
                 }
+                
                 println!("  ✓ Completed n={}, t={}\n", n, t);
             }
         }
@@ -180,14 +203,18 @@ impl FixtureCache {
             completed_dkg
         })
     }
-    fn generate_zkp_artifacts(zkp_type: ZKPType, ceremony: &DKGCeremony, halo2_setup: Option<&snark::Halo2Setup>) -> Result<ZKPArtifacts, AggError> { //Generate ZKP-specific artifacts for testing
+    fn generate_shared_artifacts(ceremony: &DKGCeremony) -> Result<ZKPArtifacts, AggError> {
+        //Generate shared artifacts (ciphertexts, partials) without ZKP-specific proofs
         let n = ceremony.n;
         let t = ceremony.t;
+        
         //Step 1: Create verified ciphertexts from all n devices (alternating states 0,1)
         let mut verified_ciphertexts_raw = Vec::new();
-        let public_package = frost::keys::PublicKeyPackage::deserialize(&ceremony.completed_dkg[0].public_package).map_err(|e| AggError::CryptoError(format!("PublicKeyPackage deser: {:?}", e)))?;
+        let public_package = frost::keys::PublicKeyPackage::deserialize(&ceremony.completed_dkg[0].public_package)
+            .map_err(|e| AggError::CryptoError(format!("PublicKeyPackage deser: {:?}", e)))?;
         let h = common::frost_to_point(&public_package.verifying_key())?;
         let g = RISTRETTO_BASEPOINT_POINT;
+        
         for (i, device_output) in ceremony.completed_dkg.iter().enumerate() {
             let state = (i % 2) as u8;
             let device_id = device_output.device_id;
@@ -201,31 +228,70 @@ impl FixtureCache {
             let c2 = g * Scalar::from(state as u64) + h * r;
             let ts = common::timestamp();
             let verified_ct = VerifiedCiphertext { timestamp: ts, c1, c2 };
-            let ct_bytes = bincode::serialize(&verified_ct).map_err(|e| AggError::CryptoError(format!("VerifiedCT serialize: {}", e)))?;
+            let ct_bytes = bincode::serialize(&verified_ct)
+                .map_err(|e| AggError::CryptoError(format!("VerifiedCT serialize: {}", e)))?;
             verified_ciphertexts_raw.push(ct_bytes);
         }
-        //Step 2: Generate sample proof (from device 1, state=1)
-        let sample_device_id = 1u32;
-        let sample_state = 1u8;
-        let sample_proof = Self::generate_single_proof(zkp_type, ceremony, halo2_setup, sample_device_id, sample_state)?;
-        //Step 3: Generate partials from first t devices
+        
+        //Step 2: Generate partials from first t devices
         let mut threshold_partials = Vec::new();
         for i in 0..t {
             let device_id = (i + 1) as u32;
-            let partial = Self::generate_single_partial(zkp_type, ceremony, halo2_setup, device_id, &verified_ciphertexts_raw)?;
-            threshold_partials.push(partial);
+            
+            let device_output = ceremony.completed_dkg.iter()
+                .find(|d| d.device_id == device_id)
+                .ok_or_else(|| AggError::CryptoError("Device not found".into()))?;
+            
+            let key_package = frost::keys::KeyPackage::deserialize(&device_output.key_package)
+                .map_err(|e| AggError::CryptoError(format!("KeyPackage deser: {:?}", e)))?;
+            let public_package = frost::keys::PublicKeyPackage::deserialize(&device_output.public_package)
+                .map_err(|e| AggError::CryptoError(format!("PublicPackage deser: {:?}", e)))?;
+            
+            let sig_seed = Self::generate_seed(b"signing_key", n, t, device_id, 0);
+            let mut sig_rng = ChaCha20Rng::from_seed(sig_seed);
+            let signing_key = SigningKey::generate(&mut sig_rng);
+            
+            let mut cts_vec = Vec::new();
+            for ct_bytes in &verified_ciphertexts_raw {
+                let ct: VerifiedCiphertext = bincode::deserialize(ct_bytes)
+                    .map_err(|e| AggError::CryptoError(format!("VerifiedCT deser: {}", e)))?;
+                cts_vec.push(ct);
+            }
+            
+            let partial = common::generate_partial_decryption(device_id, &key_package, &public_package, &signing_key, &cts_vec)?;
+            let partial_bytes = bincode::serialize(&partial)
+                .map_err(|e| AggError::CryptoError(format!("Partial serialize: {}", e)))?;
+            threshold_partials.push(partial_bytes);
         }
-        //Step 4: Compute aggregate points for partial verification
+        
+        //Step 3: Compute aggregate points for partial verification
         let mut aggregate_c1 = RistrettoPoint::identity();
         let mut aggregate_c2 = RistrettoPoint::identity();
         for ct_bytes in &verified_ciphertexts_raw {
-            let ct: VerifiedCiphertext = bincode::deserialize(ct_bytes).map_err(|e| AggError::CryptoError(format!("CT deser: {}", e)))?;
+            let ct: VerifiedCiphertext = bincode::deserialize(ct_bytes)
+                .map_err(|e| AggError::CryptoError(format!("CT deser: {}", e)))?;
             aggregate_c1 += ct.c1;
             aggregate_c2 += ct.c2;
         }
-        //Step 5: Create VerifiedPartialData with pre-computed aggregate
-        let sample_partial = VerifiedPartialData { device_id: 1, partial_bytes: threshold_partials[0].clone(), aggregate_c1_bytes: *aggregate_c1.compress().as_bytes(), aggregate_c2_bytes: *aggregate_c2.compress().as_bytes() };
-        Ok(ZKPArtifacts { zkp_type, n, t, sample_proof, verified_ciphertexts: verified_ciphertexts_raw, sample_partial, threshold_partials })
+        
+        //Step 4: Create VerifiedPartialData with pre-computed aggregate
+        let sample_partial = VerifiedPartialData {
+            device_id: 1,
+            partial_bytes: threshold_partials[0].clone(),
+            aggregate_c1_bytes: *aggregate_c1.compress().as_bytes(),
+            aggregate_c2_bytes: *aggregate_c2.compress().as_bytes()
+        };
+        
+        //Return artifacts with empty proof (will be filled in for n=5, t=3)
+        Ok(ZKPArtifacts {
+            zkp_type: ZKPType::Bulletproof, // Placeholder
+            n,
+            t,
+            sample_proof: Vec::new(), // Empty - only generated for n=5, t=3
+            verified_ciphertexts: verified_ciphertexts_raw,
+            sample_partial,
+            threshold_partials
+        })
     }
     fn generate_single_proof(zkp_type: ZKPType, ceremony: &DKGCeremony, halo2_setup: Option<&snark::Halo2Setup>, device_id: u32, state: u8) -> Result<Vec<u8>, AggError> { //Generate a single proof for testing
         let device_output = ceremony.completed_dkg.iter().find(|d| d.device_id == device_id).ok_or_else(|| AggError::CryptoError("Device not found".into()))?;
@@ -247,22 +313,6 @@ impl FixtureCache {
             ZKPType::STARK => { let device = stark::IoTDevice::new(device_id, ceremony.t, key_package, public_package, all_signing_keys, Some(signing_key))?; let proof = device.generate_proof(state)?; bincode::serialize(&proof).map_err(|e| AggError::CryptoError(format!("Proof serialize: {}", e)))? }
         };
         Ok(proof_bytes)
-    }
-    fn generate_single_partial(_zkp_type: ZKPType, ceremony: &DKGCeremony, _halo2_setup: Option<&snark::Halo2Setup>, device_id: u32, verified_ciphertexts: &[Vec<u8>]) -> Result<Vec<u8>, AggError> { //Generate a single partial decryption for testing
-        let device_output = ceremony.completed_dkg.iter().find(|d| d.device_id == device_id).ok_or_else(|| AggError::CryptoError("Device not found".into()))?;
-        let key_package = frost::keys::KeyPackage::deserialize(&device_output.key_package).map_err(|e| AggError::CryptoError(format!("KeyPackage deser: {:?}", e)))?;
-        let public_package = frost::keys::PublicKeyPackage::deserialize(&device_output.public_package).map_err(|e| AggError::CryptoError(format!("PublicKeyPackage deser: {:?}", e)))?;
-        let sig_seed = Self::generate_seed(b"signing_key", ceremony.n, ceremony.t, device_id, 0);
-        let mut sig_rng = ChaCha20Rng::from_seed(sig_seed);
-        let signing_key = SigningKey::generate(&mut sig_rng);
-        let mut cts_vec = Vec::new();
-        for ct_bytes in verified_ciphertexts {
-            let ct: VerifiedCiphertext = bincode::deserialize(ct_bytes).map_err(|e| AggError::CryptoError(format!("VerifiedCT deser: {}", e)))?;
-            cts_vec.push(ct);
-        }
-        let partial = common::generate_partial_decryption(device_id, &key_package, &public_package, &signing_key, &cts_vec)?;
-        let partial_bytes = bincode::serialize(&partial).map_err(|e| AggError::CryptoError(format!("Partial serialize: {}", e)))?;
-        Ok(partial_bytes)
     }
     fn generate_seed(domain: &[u8], n: usize, t: usize, device_id: u32, extra: u32) -> [u8; 32] { //Generate deterministic seed for reproducibility
         use sha2::{Sha256, Digest};
