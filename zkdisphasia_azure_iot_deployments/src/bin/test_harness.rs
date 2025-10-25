@@ -516,11 +516,13 @@ impl TestRunner {
         
         // Deserialize round1 packages
         let mut received_r1 = BTreeMap::new();
+        let all_ids: Vec<u16> = (1..=config.n as u16)
+            .filter(|&id| id != config.device_id as u16)
+            .collect();
+
         for (i, pkg_bytes) in r1_packages_bytes.iter().enumerate() {
-            let pkg = frost::keys::dkg::round1::Package::deserialize(&pkg_bytes[..])
-                .map_err(|e| format!("Failed to deserialize R1 package: {:?}", e))?;
-            let id = frost::Identifier::try_from((i + 1) as u16)
-                .map_err(|e| format!("Failed to create identifier: {:?}", e))?;
+            let pkg = frost::keys::dkg::round1::Package::deserialize(&pkg_bytes[..])?;
+            let id = frost::Identifier::try_from(all_ids[i])?;  // ✅ CORRECT
             received_r1.insert(id, pkg);
         }
         
@@ -549,21 +551,21 @@ impl TestRunner {
         )?;
         
         // Deserialize packages
+        let all_ids: Vec<u16> = (1..=config.n as u16)
+            .filter(|&id| id != config.device_id as u16)
+            .collect();
+
         let mut received_r1 = BTreeMap::new();
         for (i, pkg_bytes) in r1_packages_bytes.iter().enumerate() {
-            let pkg = frost::keys::dkg::round1::Package::deserialize(&pkg_bytes[..])
-                .map_err(|e| format!("R1 deser: {:?}", e))?;
-            let id = frost::Identifier::try_from((i + 1) as u16)
-                .map_err(|e| format!("ID: {:?}", e))?;
+            let pkg = frost::keys::dkg::round1::Package::deserialize(&pkg_bytes[..])?;
+            let id = frost::Identifier::try_from(all_ids[i])?;  // ✅ CORRECT
             received_r1.insert(id, pkg);
         }
         
         let mut received_r2 = BTreeMap::new();
         for (i, pkg_bytes) in r2_packages_bytes.iter().enumerate() {
-            let pkg = frost::keys::dkg::round2::Package::deserialize(&pkg_bytes[..])
-                .map_err(|e| format!("R2 deser: {:?}", e))?;
-            let id = frost::Identifier::try_from((i + 1) as u16)
-                .map_err(|e| format!("ID: {:?}", e))?;
+            let pkg = frost::keys::dkg::round2::Package::deserialize(&pkg_bytes[..])?;
+            let id = frost::Identifier::try_from(all_ids[i])?;  // ✅ CORRECT
             received_r2.insert(id, pkg);
         }
         
