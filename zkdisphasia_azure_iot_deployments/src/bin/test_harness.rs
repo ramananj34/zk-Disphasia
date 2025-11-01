@@ -59,9 +59,10 @@ impl TestRunner {
     fn new(args: &Args) -> Result<Self, Box<dyn std::error::Error>> { let halo2_setup = if std::path::Path::new("./trusted_setup/kzg_bn254_5.params").exists() { println!("Loading Halo2 setup..."); Some(snark::setup_halo2()?) } else { println!("Warning: Halo2 params not found, SNARK tests will fail"); None }; let output_file = OpenOptions::new().create(true).append(true).open(&args.output)?; Ok(Self { fixture_client: FixtureClient::new(args.fixture_server.clone()), output_file, vm_profile: args.vm_profile.clone(), device_id: args.device_id, halo2_setup, peer_keys_cache: HashMap::new() }) }
     fn get_cached_peer_keys(&mut self, n: usize, t: usize) -> Result<HashMap<u32, VerifyingKey>, Box<dyn std::error::Error>> { if let Some(cached) = self.peer_keys_cache.get(&(n, t)) { return Ok(cached.clone()); } let mut peer_keys = HashMap::new(); for i in 1..=n { let dev_out = self.fixture_client.get_dkg_completed(n, t, i as u32)?; let vk = VerifyingKey::from_bytes(&dev_out.signing_pubkey)?; peer_keys.insert(i as u32, vk); } self.peer_keys_cache.insert((n, t), peer_keys.clone()); Ok(peer_keys) } //Fetch and cache peer signing keys
     fn run_all_tests(&mut self) { //Run all tests with optimized structure (shared functions once, ZKP-specific per type)
-        let network_sizes = vec![5, 10, 20, 50]; //let network_sizes = vec![5, 10, 20, 50, 100, 500, 1000, 2500, 5000, 10000];
-        let threshold_ratios = vec![0.5, 0.67, 0.75];
-        let network_scaled_functions = vec![TestFunction::DKG1, TestFunction::DKG2, TestFunction::DKG3, TestFunction::PartialGen, TestFunction::AggCompute]; // Functions that scale with network
+        //let network_sizes = vec![5, 10, 20, 50, 100, 500, 1000];
+        let network_sizes = vec![5, 10, 20, 50];
+        let threshold_ratios = vec![0.25, 0.5, 0.67, 0.75];
+        let network_scaled_functions = vec![TestFunction::PartialGen, TestFunction::AggCompute, TestFunction::DKG1, TestFunction::DKG2, TestFunction::DKG3]; // Functions that scale with network
         let zkp_functions = vec![TestFunction::ProofGen, TestFunction::ProofVerify]; // ZKP-specific functions (test once per type)
         let zkp_types = vec![ZKPType::Bulletproof, ZKPType::SNARK, ZKPType::STARK];
 
@@ -70,27 +71,6 @@ impl TestRunner {
         println!("=== Starting Test Suite ===\nVM Profile: {}\nTotal tests to run: {}\n", self.vm_profile, total_tests);
 
         let mut success_count = 0; let mut failure_count = 0;
-
-        println!("Testing network-scaled functions (DKG, PartialGen, Aggregate)..."); // Test network-scaled functions
-        for n in &network_sizes { 
-            for t_ratio in &threshold_ratios { 
-                let t = (*n as f64 * t_ratio).ceil() as usize; 
-                for function in &network_scaled_functions { 
-                    for run in 1..=30 { 
-                        test_count += 1; 
-                        let config = TestConfig { zkp_type: None, function: *function, n: *n, t, device_id: self.device_id, run }; 
-                        println!("[{}/{}] {:?} n={} t={} run={}", test_count, total_tests, function, n, t, run); 
-                        match self.run_single_test(&config) { 
-                            Ok(metrics) => { 
-                                self.write_metrics(&metrics); 
-                                if metrics.status == "SUCCESS" { success_count += 1; } else { failure_count += 1; } 
-                            } 
-                            Err(e) => { eprintln!("  Error: {}", e); failure_count += 1; } 
-                        } 
-                    } 
-                } 
-            } 
-        }
 
         println!("\nTesting PartialVerify (single config)..."); // Test PartialVerify once
         let n = 5; let t = 3;
@@ -122,6 +102,27 @@ impl TestRunner {
                             if metrics.status == "SUCCESS" { success_count += 1; } else { failure_count += 1; } 
                         } 
                         Err(e) => { eprintln!("  Error: {}", e); failure_count += 1; } 
+                    } 
+                } 
+            } 
+        }
+
+        println!("Testing network-scaled functions (DKG, PartialGen, Aggregate)..."); // Test network-scaled functions
+        for function in &network_scaled_functions { 
+            for n in &network_sizes { 
+                for t_ratio in &threshold_ratios { 
+                    let t = (*n as f64 * t_ratio).ceil() as usize; 
+                    for run in 1..=30 { 
+                        test_count += 1; 
+                        let config = TestConfig { zkp_type: None, function: *function, n: *n, t, device_id: self.device_id, run }; 
+                        println!("[{}/{}] {:?} n={} t={} run={}", test_count, total_tests, function, n, t, run); 
+                        match self.run_single_test(&config) { 
+                            Ok(metrics) => { 
+                                self.write_metrics(&metrics); 
+                                if metrics.status == "SUCCESS" { success_count += 1; } else { failure_count += 1; } 
+                            } 
+                            Err(e) => { eprintln!("  Error: {}", e); failure_count += 1; } 
+                        } 
                     } 
                 } 
             } 
