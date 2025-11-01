@@ -59,8 +59,7 @@ impl TestRunner {
     fn new(args: &Args) -> Result<Self, Box<dyn std::error::Error>> { let halo2_setup = if std::path::Path::new("./trusted_setup/kzg_bn254_5.params").exists() { println!("Loading Halo2 setup..."); Some(snark::setup_halo2()?) } else { println!("Warning: Halo2 params not found, SNARK tests will fail"); None }; let output_file = OpenOptions::new().create(true).append(true).open(&args.output)?; Ok(Self { fixture_client: FixtureClient::new(args.fixture_server.clone()), output_file, vm_profile: args.vm_profile.clone(), device_id: args.device_id, halo2_setup, peer_keys_cache: HashMap::new() }) }
     fn get_cached_peer_keys(&mut self, n: usize, t: usize) -> Result<HashMap<u32, VerifyingKey>, Box<dyn std::error::Error>> { if let Some(cached) = self.peer_keys_cache.get(&(n, t)) { return Ok(cached.clone()); } let mut peer_keys = HashMap::new(); for i in 1..=n { let dev_out = self.fixture_client.get_dkg_completed(n, t, i as u32)?; let vk = VerifyingKey::from_bytes(&dev_out.signing_pubkey)?; peer_keys.insert(i as u32, vk); } self.peer_keys_cache.insert((n, t), peer_keys.clone()); Ok(peer_keys) } //Fetch and cache peer signing keys
     fn run_all_tests(&mut self) { //Run all tests with optimized structure (shared functions once, ZKP-specific per type)
-        //let network_sizes = vec![5, 10, 20, 50, 100, 500, 1000];
-        let network_sizes = vec![5, 10, 20, 50];
+        let network_sizes = vec![5, 10, 20, 50, 100, 500, 1000];
         let threshold_ratios = vec![0.25, 0.5, 0.67, 0.75];
         let network_scaled_functions = vec![TestFunction::PartialGen, TestFunction::AggCompute, TestFunction::DKG1, TestFunction::DKG2, TestFunction::DKG3]; // Functions that scale with network
         let zkp_functions = vec![TestFunction::ProofGen, TestFunction::ProofVerify]; // ZKP-specific functions (test once per type)

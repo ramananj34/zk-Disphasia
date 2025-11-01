@@ -18,8 +18,7 @@ use zk_disphasia_azure_test::snark;
 use zk_disphasia_azure_test::stark;
 
 //Network configurations to test
-//const NETWORK_SIZES: &[usize] = &[5, 10, 20, 50, 100, 500, 1000]; //Test network sizes
-const NETWORK_SIZES: &[usize] = &[5, 10, 20, 50]; //Test network sizes
+const NETWORK_SIZES: &[usize] = &[5, 10, 20, 50, 100, 500, 1000]; //Test network sizes
 const THRESHOLD_RATIOS: &[f64] = &[0.25, 0.5, 0.67, 0.75]; //Threshold ratios
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
